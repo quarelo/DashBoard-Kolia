@@ -1,0 +1,22 @@
+[
+  { "term": "suporte", "weight": 0.92, "category": "Atendimento", "meetingIds": ["mtg-001", "mtg-003", "mtg-006"] },
+  { "term": "renovação", "weight": 0.88, "category": "Comercial", "meetingIds": ["mtg-001", "mtg-006"] },
+  { "term": "fiscal", "weight": 0.85, "category": "ERP", "meetingIds": ["mtg-002", "mtg-005"] },
+  { "term": "compliance", "weight": 0.83, "category": "Regulatório", "meetingIds": ["mtg-004", "mtg-005"] },
+  { "term": "performance", "weight": 0.80, "category": "Produto", "meetingIds": ["mtg-003"] },
+  { "term": "integração", "weight": 0.79, "category": "Produto", "meetingIds": ["mtg-003", "mtg-009"] },
+  { "term": "analytics", "weight": 0.77, "category": "BI", "meetingIds": ["mtg-007"] },
+  { "term": "SAP", "weight": 0.75, "category": "Competição", "meetingIds": ["mtg-006"] },
+  { "term": "Oracle", "weight": 0.73, "category": "Competição", "meetingIds": ["mtg-008"] },
+  { "term": "IoT", "weight": 0.72, "category": "Inovação", "meetingIds": ["mtg-010"] },
+  { "term": "LGPD", "weight": 0.70, "category": "Regulatório", "meetingIds": ["mtg-005"] },
+  { "term": "ANVISA", "weight": 0.68, "category": "Regulatório", "meetingIds": ["mtg-004"] },
+  { "term": "PDV", "weight": 0.65, "category": "Produto", "meetingIds": ["mtg-009"] },
+  { "term": "omnichannel", "weight": 0.63, "category": "Estratégia", "meetingIds": ["mtg-007"] },
+  { "term": "manutenção preditiva", "weight": 0.61, "category": "Inovação", "meetingIds": ["mtg-010"] },
+  { "term": "churn", "weight": 0.60, "category": "Risco", "meetingIds": ["mtg-001", "mtg-006"] },
+  { "term": "SLA", "weight": 0.58, "category": "Atendimento", "meetingIds": ["mtg-001"] },
+  { "term": "upsell", "weight": 0.57, "category": "Comercial", "meetingIds": ["mtg-002", "mtg-004", "mtg-010"] },
+  { "term": "rastreabilidade", "weight": 0.55, "category": "Produto", "meetingIds": ["mtg-004"] },
+  { "term": "segurança", "weight": 0.52, "category": "Regulatório", "meetingIds": ["mtg-005"] }
+]
