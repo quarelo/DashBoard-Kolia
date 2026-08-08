@@ -1,0 +1,93 @@
+services:
+  frontend:
+    container_name: kolia-frontend
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:8080
+    depends_on:
+      - backend
+    networks:
+      - kolia-network
+    restart: unless-stopped
+
+  backend:
+    container_name: kolia-backend
+    build:
+      context: ../back
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/kolia
+      SPRING_DATASOURCE_USERNAME: kolia
+      SPRING_DATASOURCE_PASSWORD: kolia
+      IA_SERVICE_URL: http://ia-service:3000
+    depends_on:
+      - postgres
+      - ia-service
+    networks:
+      - kolia-network
+    restart: unless-stopped
+
+  ia-service:
+    container_name: kolia-ia-service
+    build:
+      context: ../IA
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      OLLAMA_URL: http://ollama:11434/api/generate
+      MODEL: qwen2.5:3b
+      NUM_CTX: 32768
+      MAX_TOKENS_ENTRADA_BLOCO: 2500
+      OVERLAP_TOKENS: 200
+      TOKENS_RESPOSTA_BLOCO: 4096
+      TOKENS_RESPOSTA_CONSOLIDACAO: 4096
+    volumes:
+      - ../IA/logs:/app/logs
+    depends_on:
+      - ollama
+    networks:
+      - kolia-network
+    restart: unless-stopped
+
+  ollama:
+    container_name: kolia-ollama
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - kolia-network
+    restart: unless-stopped
+
+  postgres:
+    container_name: kolia-postgres
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: kolia
+      POSTGRES_USER: kolia
+      POSTGRES_PASSWORD: kolia
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - kolia-network
+    restart: unless-stopped
+
+networks:
+  kolia-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  ollama_data:
