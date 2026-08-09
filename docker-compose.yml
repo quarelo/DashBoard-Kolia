@@ -2,13 +2,12 @@ services:
   frontend:
     container_name: kolia-frontend
     build:
-      context: ../frontend
+      context: ./frontend
       dockerfile: Dockerfile
     ports:
       - "5173:5173"
     environment:
       VITE_API_URL: http://localhost:8080
-    # Removed strict depends_on to allow services to start independently
     networks:
       - kolia-network
     restart: unless-stopped
@@ -16,7 +15,7 @@ services:
   backend:
     container_name: kolia-backend
     build:
-      context: ../backend
+      context: ./backend
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
@@ -25,7 +24,6 @@ services:
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-kolia}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-kolia}
       IA_SERVICE_URL: http://ia-service:3000
-    # Removed strict depends_on to allow services to start independently
     networks:
       - kolia-network
     restart: unless-stopped
@@ -33,7 +31,7 @@ services:
   ia-service:
     container_name: kolia-ia-service
     build:
-      context: ../ia
+      context: ./ia
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
@@ -47,8 +45,7 @@ services:
       TOKENS_RESPOSTA_BLOCO: ${TOKENS_RESPOSTA_BLOCO:-4096}
       TOKENS_RESPOSTA_CONSOLIDACAO: ${TOKENS_RESPOSTA_CONSOLIDACAO:-4096}
     volumes:
-      - ../ia/logs:/app/logs
-    # Removed strict depends_on to allow services to start independently
+      - ./ia/logs:/app/logs
     networks:
       - kolia-network
     restart: unless-stopped
@@ -67,7 +64,7 @@ services:
   postgres:
     container_name: kolia-postgres
     image: pgvector/pgvector:pg16
-    # Map Postgres to host port 5433 to avoid conflicts with existing local Postgres
+    # Avoid conflicting local Postgres: map to 5433
     ports:
       - "5433:5432"
     environment:
@@ -76,7 +73,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kolia}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - kolia-network
     restart: unless-stopped
