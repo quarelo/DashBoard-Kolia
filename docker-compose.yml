@@ -1,6 +1,5 @@
 services:
   frontend:
-    container_name: kolia-frontend
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -13,7 +12,6 @@ services:
     restart: unless-stopped
 
   backend:
-    container_name: kolia-backend
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -24,12 +22,14 @@ services:
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-kolia}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-kolia}
       IA_SERVICE_URL: http://ia-service:3000
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - kolia-network
     restart: unless-stopped
 
   ia-service:
-    container_name: kolia-ia-service
     build:
       context: ./ia
       dockerfile: Dockerfile
@@ -46,12 +46,13 @@ services:
       TOKENS_RESPOSTA_CONSOLIDACAO: ${TOKENS_RESPOSTA_CONSOLIDACAO:-4096}
     volumes:
       - ./ia/logs:/app/logs
+    depends_on:
+      - ollama
     networks:
       - kolia-network
     restart: unless-stopped
 
   ollama:
-    container_name: kolia-ollama
     image: ollama/ollama:latest
     ports:
       - "11434:11434"
@@ -62,7 +63,6 @@ services:
     restart: unless-stopped
 
   postgres:
-    container_name: kolia-postgres
     image: pgvector/pgvector:pg16
     # Avoid conflicting local Postgres: map to 5433
     ports:
