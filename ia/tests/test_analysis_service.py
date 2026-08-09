@@ -57,3 +57,25 @@ def test_analyze_meeting_persists_real_ollama_results(monkeypatch):
     assert stored_chunk.embedding == embedding
     assert result.final_summary == final_summary
     assert result.status == "DONE"
+
+
+def test_failed_analysis_keeps_counts_and_useful_error(monkeypatch):
+    monkeypatch.setattr(
+        analysis_service,
+        "generate_chunk_summary",
+        lambda _text: (_ for _ in ()).throw(RuntimeError("JSON inválido")),
+    )
+    session = FakeSession()
+    payload = AnalyzeRequest(
+        meeting_id=UUID("55555555-5555-5555-5555-555555555555"),
+        user_id=None,
+        title="Reunião com falha",
+        transcription="Cliente relatou erro na integração.",
+    )
+
+    result = analysis_service.analyze_meeting(session, payload)
+
+    assert result.status == "FAILED"
+    assert result.total_tokens == 6
+    assert result.total_chunks == 1
+    assert result.error_message == "JSON inválido"

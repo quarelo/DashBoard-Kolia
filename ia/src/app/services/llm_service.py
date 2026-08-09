@@ -18,6 +18,47 @@ class OllamaResponseError(OllamaError):
     pass
 
 
+CHUNK_SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "temas_discutidos": {"type": "array", "items": {"type": "string"}},
+        "problemas_identificados": {"type": "array", "items": {"type": "string"}},
+        "decisoes_tomadas": {"type": "array", "items": {"type": "string"}},
+        "duvidas_em_aberto": {"type": "array", "items": {"type": "string"}},
+        "oportunidades_insights": {"type": "array", "items": {"type": "string"}},
+        "evidencias_importantes": {"type": "array", "items": {"type": "string"}},
+        "metricas_negocio": {"type": "object"},
+    },
+    "required": [
+        "temas_discutidos", "problemas_identificados", "decisoes_tomadas",
+        "duvidas_em_aberto", "oportunidades_insights",
+        "evidencias_importantes", "metricas_negocio",
+    ],
+    "additionalProperties": False,
+}
+
+FINAL_SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "resumo_geral": {"type": "string"},
+        "temas_agrupados": {"type": "array", "items": {"type": "object"}},
+        "problemas_identificados": {"type": "array", "items": {"type": "string"}},
+        "decisoes_tomadas": {"type": "array", "items": {"type": "string"}},
+        "duvidas_em_aberto": {"type": "array", "items": {"type": "string"}},
+        "oportunidades_insights": {"type": "array", "items": {"type": "string"}},
+        "evidencias_importantes": {"type": "array", "items": {"type": "string"}},
+        "metricas_negocio": {"type": "object"},
+        "acoes_recomendadas": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "resumo_geral", "temas_agrupados", "problemas_identificados",
+        "decisoes_tomadas", "duvidas_em_aberto", "oportunidades_insights",
+        "evidencias_importantes", "metricas_negocio", "acoes_recomendadas",
+    ],
+    "additionalProperties": False,
+}
+
+
 def _post_json(
     url: str,
     payload: dict[str, Any],
@@ -52,7 +93,10 @@ def _post_json(
 
 
 def _generate_json(
-    prompt: str, *, client: httpx.Client | None = None
+    prompt: str,
+    schema: dict[str, Any],
+    *,
+    client: httpx.Client | None = None,
 ) -> dict[str, Any]:
     data = _post_json(
         settings.ollama_generate_url,
@@ -60,8 +104,12 @@ def _generate_json(
             "model": settings.model,
             "prompt": prompt,
             "stream": False,
-            "format": "json",
-            "options": {"temperature": 0, "num_predict": 2048},
+            "format": schema,
+            "think": settings.ollama_think,
+            "options": {
+                "temperature": 0,
+                "num_predict": settings.ollama_num_predict,
+            },
         },
         client=client,
         timeout=180,
@@ -89,7 +137,7 @@ Use listas para as categorias. metricas_negocio deve ser um objeto. Não invente
 
 TRECHO:
 {clean_content}"""
-    return _generate_json(prompt, client=client)
+    return _generate_json(prompt, CHUNK_SUMMARY_SCHEMA, client=client)
 
 
 def consolidate_summaries(
@@ -104,7 +152,7 @@ metricas_negocio e acoes_recomendadas. Remova duplicações e não invente fatos
 
 RESUMOS PARCIAIS:
 {summaries_json}"""
-    return _generate_json(prompt, client=client)
+    return _generate_json(prompt, FINAL_SUMMARY_SCHEMA, client=client)
 
 
 def generate_embedding(

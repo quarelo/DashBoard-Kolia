@@ -24,8 +24,11 @@ def test_generate_chunk_summary_uses_configured_model_and_decodes_json(monkeypat
         assert request.url.path == "/api/generate"
         payload = json.loads(request.content)
         assert payload["model"] == "modelo-do-env:latest"
-        assert payload["format"] == "json"
+        assert payload["format"]["type"] == "object"
+        assert payload["format"]["additionalProperties"] is False
         assert payload["stream"] is False
+        assert payload["think"] is False
+        assert payload["options"]["num_predict"] == 512
         return httpx.Response(
             200,
             json={"response": json.dumps({"temas_discutidos": ["ERP"]})},

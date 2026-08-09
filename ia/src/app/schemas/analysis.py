@@ -18,6 +18,7 @@ class AnalyzeResponse(BaseModel):
     total_tokens: int
     total_chunks: int
     final_summary: dict[str, Any] | None = None
+    error_message: str | None = None
 
 
 class ChunkResponse(BaseModel):

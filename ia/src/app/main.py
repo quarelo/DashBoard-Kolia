@@ -32,7 +32,7 @@ def health():
 @app.post("/analisar", response_model=AnalyzeResponse)
 def analisar(payload: AnalyzeRequest, db: Session = Depends(get_db)):
     analysis = analyze_meeting(db, payload)
-    return AnalyzeResponse(analysis_id=analysis.id, meeting_id=analysis.external_meeting_id, status=analysis.status, total_tokens=analysis.total_tokens, total_chunks=analysis.total_chunks, final_summary=analysis.final_summary)
+    return AnalyzeResponse(analysis_id=analysis.id, meeting_id=analysis.external_meeting_id, status=analysis.status, total_tokens=analysis.total_tokens, total_chunks=analysis.total_chunks, final_summary=analysis.final_summary, error_message=analysis.error_message)
 
 
 def _detail(analysis: MeetingAnalysis) -> AnalysisDetailResponse:

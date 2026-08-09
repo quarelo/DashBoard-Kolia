@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     embedding_dim: int = 768
     ollama_generate_url: str = "http://ollama:11434/api/generate"
     ollama_embed_url: str = "http://ollama:11434/api/embed"
+    ollama_think: bool = False
+    ollama_num_predict: int = 512
     model: str = "qwen2.5:3b"
     embedding_model: str = "nomic-embed-text"
 
