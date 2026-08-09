@@ -27,5 +27,12 @@ O serviço fica disponível em `http://localhost:3000`.
 docker compose run --rm --no-deps ia-service python -m pytest -q tests
 ```
 
-O resumo e o embedding atuais são mocks determinísticos para validar o fluxo do
-MVP. As configurações disponíveis estão documentadas em `.env.example`.
+Os resumos e embeddings são gerados pelo Ollama. O modelo de análise vem de
+`OLLAMA_MODEL` e o de embedding de `EMBEDDING_MODEL`. Se algum modelo estiver
+ausente, execute o instalador interativo na raiz do projeto:
+
+```bash
+./ia/install-model.sh
+```
+
+As demais configurações disponíveis estão documentadas em `.env.example`.

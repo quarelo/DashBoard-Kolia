@@ -1,34 +1,97 @@
+import json
+
+import httpx
+import pytest
+
 from src.app.core.config import settings
 from src.app.services.llm_service import (
-    consolidate_mock_summaries,
-    generate_fake_embedding,
-    generate_mock_chunk_summary,
+    OllamaModelNotFoundError,
+    OllamaResponseError,
+    consolidate_summaries,
+    generate_chunk_summary,
+    generate_embedding,
 )
 
 
-def test_generate_mock_chunk_summary_exposes_expected_business_sections():
-    summary = generate_mock_chunk_summary("Cliente precisa integrar o ERP.")
-
-    assert summary["temas_discutidos"] == ["Cliente precisa integrar o ERP."]
-    assert summary["decisoes_tomadas"] == []
-    assert summary["metricas_negocio"]["produtos_servicos_citados"] == []
+def client_for(handler):
+    return httpx.Client(transport=httpx.MockTransport(handler))
 
 
-def test_consolidate_mock_summaries_collects_chunk_topics():
-    final_summary = consolidate_mock_summaries(
-        [
-            {"temas_discutidos": ["Integração"]},
-            {"temas_discutidos": ["Prazo"]},
-        ]
+def test_generate_chunk_summary_uses_configured_model_and_decodes_json(monkeypatch):
+    monkeypatch.setattr(settings, "model", "modelo-do-env:latest")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/generate"
+        payload = json.loads(request.content)
+        assert payload["model"] == "modelo-do-env:latest"
+        assert payload["format"] == "json"
+        assert payload["stream"] is False
+        return httpx.Response(
+            200,
+            json={"response": json.dumps({"temas_discutidos": ["ERP"]})},
+        )
+
+    result = generate_chunk_summary("Integração com ERP", client=client_for(handler))
+
+    assert result == {"temas_discutidos": ["ERP"]}
+
+
+def test_consolidate_summaries_sends_partial_summaries_to_model():
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert "Integração" in payload["prompt"]
+        return httpx.Response(
+            200,
+            json={"response": json.dumps({"resumo_geral": "Resumo real"})},
+        )
+
+    result = consolidate_summaries(
+        [{"temas_discutidos": ["Integração"]}], client=client_for(handler)
     )
 
-    assert final_summary["temas_agrupados"][0]["pontos"] == ["Integração", "Prazo"]
+    assert result == {"resumo_geral": "Resumo real"}
 
 
-def test_generate_fake_embedding_is_deterministic_and_has_configured_dimension():
-    first = generate_fake_embedding("conteúdo")
-    second = generate_fake_embedding("conteúdo")
+def test_generate_embedding_uses_configured_model(monkeypatch):
+    monkeypatch.setattr(settings, "embedding_model", "embed-do-env")
+    monkeypatch.setattr(settings, "embedding_dim", 3)
 
-    assert first == second
-    assert len(first) == settings.embedding_dim
-    assert abs(sum(value * value for value in first) - 1.0) < 1e-9
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/embed"
+        assert json.loads(request.content) == {
+            "model": "embed-do-env",
+            "input": "conteúdo",
+        }
+        return httpx.Response(200, json={"embeddings": [[0.1, 0.2, 0.3]]})
+
+    assert generate_embedding("conteúdo", client=client_for(handler)) == [0.1, 0.2, 0.3]
+
+
+def test_generate_embedding_rejects_unexpected_dimension(monkeypatch):
+    monkeypatch.setattr(settings, "embedding_dim", 3)
+    client = client_for(
+        lambda _request: httpx.Response(200, json={"embeddings": [[0.1, 0.2]]})
+    )
+
+    with pytest.raises(OllamaResponseError, match="2 dimensões; esperado 3"):
+        generate_embedding("conteúdo", client=client)
+
+
+def test_missing_model_error_points_to_installer():
+    client = client_for(
+        lambda _request: httpx.Response(
+            404, json={"error": "model 'ausente' not found"}
+        )
+    )
+
+    with pytest.raises(OllamaModelNotFoundError, match=r"./ia/install-model.sh"):
+        generate_chunk_summary("conteúdo", client=client)
+
+
+def test_invalid_generation_json_is_rejected():
+    client = client_for(
+        lambda _request: httpx.Response(200, json={"response": "não é json"})
+    )
+
+    with pytest.raises(OllamaResponseError, match="JSON inválido"):
+        generate_chunk_summary("conteúdo", client=client)
