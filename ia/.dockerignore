@@ -4,3 +4,4 @@ __pycache__
 logs
 .git
 Dockerfile
+.pytest_cache
