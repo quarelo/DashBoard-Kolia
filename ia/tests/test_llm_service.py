@@ -19,16 +19,20 @@ def client_for(handler):
 
 def test_generate_chunk_summary_uses_configured_model_and_decodes_json(monkeypatch):
     monkeypatch.setattr(settings, "model", "modelo-do-env:latest")
+    monkeypatch.setattr(settings, "ollama_chunk_think", True)
+    monkeypatch.setattr(settings, "ollama_chunk_num_predict", 768)
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/generate"
         payload = json.loads(request.content)
         assert payload["model"] == "modelo-do-env:latest"
+        assert "não crie novas ações" in payload["prompt"].lower()
+        assert "lista vazia" in payload["prompt"].lower()
         assert payload["format"]["type"] == "object"
         assert payload["format"]["additionalProperties"] is False
         assert payload["stream"] is False
-        assert payload["think"] is False
-        assert payload["options"]["num_predict"] == 512
+        assert payload["think"] is True
+        assert payload["options"]["num_predict"] == 768
         return httpx.Response(
             200,
             json={"response": json.dumps({"temas_discutidos": ["ERP"]})},
@@ -39,10 +43,15 @@ def test_generate_chunk_summary_uses_configured_model_and_decodes_json(monkeypat
     assert result == {"temas_discutidos": ["ERP"]}
 
 
-def test_consolidate_summaries_sends_partial_summaries_to_model():
+def test_consolidate_summaries_uses_its_own_thinking_budget(monkeypatch):
+    monkeypatch.setattr(settings, "ollama_consolidation_think", True)
+    monkeypatch.setattr(settings, "ollama_consolidation_num_predict", 1024)
+
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         assert "Integração" in payload["prompt"]
+        assert payload["think"] is True
+        assert payload["options"]["num_predict"] == 1024
         return httpx.Response(
             200,
             json={"response": json.dumps({"resumo_geral": "Resumo real"})},

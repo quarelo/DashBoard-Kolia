@@ -21,6 +21,7 @@ class OllamaResponseError(OllamaError):
 CHUNK_SUMMARY_SCHEMA = {
     "type": "object",
     "properties": {
+        "resumo_chunk": {"type": "string"},
         "temas_discutidos": {"type": "array", "items": {"type": "string"}},
         "problemas_identificados": {"type": "array", "items": {"type": "string"}},
         "decisoes_tomadas": {"type": "array", "items": {"type": "string"}},
@@ -28,11 +29,12 @@ CHUNK_SUMMARY_SCHEMA = {
         "oportunidades_insights": {"type": "array", "items": {"type": "string"}},
         "evidencias_importantes": {"type": "array", "items": {"type": "string"}},
         "metricas_negocio": {"type": "object"},
+        "acoes_recomendadas": {"type": "array", "items": {"type": "string"}},
     },
     "required": [
-        "temas_discutidos", "problemas_identificados", "decisoes_tomadas",
+        "resumo_chunk", "temas_discutidos", "problemas_identificados", "decisoes_tomadas",
         "duvidas_em_aberto", "oportunidades_insights",
-        "evidencias_importantes", "metricas_negocio",
+        "evidencias_importantes", "metricas_negocio", "acoes_recomendadas",
     ],
     "additionalProperties": False,
 }
@@ -95,6 +97,8 @@ def _post_json(
 def _generate_json(
     prompt: str,
     schema: dict[str, Any],
+    think: bool,
+    num_predict: int,
     *,
     client: httpx.Client | None = None,
 ) -> dict[str, Any]:
@@ -105,10 +109,10 @@ def _generate_json(
             "prompt": prompt,
             "stream": False,
             "format": schema,
-            "think": settings.ollama_think,
+            "think": think,
             "options": {
                 "temperature": 0,
-                "num_predict": settings.ollama_num_predict,
+                "num_predict": num_predict,
             },
         },
         client=client,
@@ -131,13 +135,24 @@ def generate_chunk_summary(
 ) -> dict[str, Any]:
     prompt = f"""Você é um especialista em análise de reuniões corporativas.
 Analise somente o trecho fornecido e retorne um objeto JSON válido com estas chaves:
-temas_discutidos, problemas_identificados, decisoes_tomadas, duvidas_em_aberto,
+resumo_chunk, temas_discutidos, problemas_identificados, decisoes_tomadas, duvidas_em_aberto,
 oportunidades_insights, evidencias_importantes e metricas_negocio.
-Use listas para as categorias. metricas_negocio deve ser um objeto. Não invente fatos.
+Inclua também acoes_recomendadas. Use listas para as categorias. Toda decisão
+explícita deve aparecer em decisoes_tomadas. metricas_negocio deve ser um objeto.
+O resumo_chunk deve ser coerente com os campos estruturados. Em
+acoes_recomendadas, copie apenas compromissos ou próximos passos explicitamente
+mencionados no trecho. Não crie novas ações. Se não houver ação explícita, use
+lista vazia. Não invente fatos.
 
 TRECHO:
 {clean_content}"""
-    return _generate_json(prompt, CHUNK_SUMMARY_SCHEMA, client=client)
+    return _generate_json(
+        prompt,
+        CHUNK_SUMMARY_SCHEMA,
+        settings.ollama_chunk_think,
+        settings.ollama_chunk_num_predict,
+        client=client,
+    )
 
 
 def consolidate_summaries(
@@ -152,7 +167,13 @@ metricas_negocio e acoes_recomendadas. Remova duplicações e não invente fatos
 
 RESUMOS PARCIAIS:
 {summaries_json}"""
-    return _generate_json(prompt, FINAL_SUMMARY_SCHEMA, client=client)
+    return _generate_json(
+        prompt,
+        FINAL_SUMMARY_SCHEMA,
+        settings.ollama_consolidation_think,
+        settings.ollama_consolidation_num_predict,
+        client=client,
+    )
 
 
 def generate_embedding(
