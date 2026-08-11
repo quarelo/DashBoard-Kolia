@@ -227,3 +227,86 @@ def test_resume_summaries_skips_completed_chunks(monkeypatch):
     assert pending.chunk_summary["resumo_chunk"] == "chunk dois"
     assert result.status == "DASHBOARD_READY"
     assert result.final_summary == {"resumo_geral": "já pronto, chunk dois"}
+
+
+def test_resume_embeddings_skips_existing_vectors(monkeypatch):
+    analysis_id = uuid4()
+    analysis = MeetingAnalysis(
+        id=analysis_id,
+        external_meeting_id=uuid4(),
+        title="Embeddings",
+        status="DASHBOARD_READY",
+        total_tokens=4,
+        total_chunks=2,
+        final_summary={"resumo_geral": "pronto"},
+    )
+    first = MeetingChunk(
+        analysis_id=analysis_id,
+        external_meeting_id=analysis.external_meeting_id,
+        chunk_index=1,
+        token_count=2,
+        content="chunk um",
+        clean_content="chunk um",
+        embedding=[0.1] * 768,
+    )
+    second = MeetingChunk(
+        analysis_id=analysis_id,
+        external_meeting_id=analysis.external_meeting_id,
+        chunk_index=2,
+        token_count=2,
+        content="chunk dois",
+        clean_content="chunk dois",
+    )
+    session = FakeSession()
+    session.added.extend([analysis, first, second])
+    calls = []
+    monkeypatch.setattr(
+        analysis_service,
+        "generate_embedding",
+        lambda text: calls.append(text) or [0.2] * 768,
+    )
+
+    result = analysis_service.process_analysis_embeddings(session, analysis_id)
+
+    assert calls == ["chunk dois"]
+    assert second.embedding == [0.2] * 768
+    assert result.status == "DONE"
+    assert result.final_summary == {"resumo_geral": "pronto"}
+
+
+def test_embedding_failure_preserves_dashboard(monkeypatch):
+    analysis_id = uuid4()
+    analysis = MeetingAnalysis(
+        id=analysis_id,
+        external_meeting_id=uuid4(),
+        title="Falha de embedding",
+        status="DASHBOARD_READY",
+        total_tokens=2,
+        total_chunks=1,
+        final_summary={"resumo_geral": "continua disponível"},
+    )
+    session = FakeSession()
+    session.added.extend(
+        [
+            analysis,
+            MeetingChunk(
+                analysis_id=analysis_id,
+                external_meeting_id=analysis.external_meeting_id,
+                chunk_index=1,
+                token_count=2,
+                content="conteúdo",
+                clean_content="conteúdo",
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        analysis_service,
+        "generate_embedding",
+        lambda _text: (_ for _ in ()).throw(RuntimeError("embedding indisponível")),
+    )
+
+    result = analysis_service.process_analysis_embeddings(session, analysis_id)
+
+    assert result.status == "DASHBOARD_READY_WITH_EMBEDDING_ERROR"
+    assert result.final_summary == {"resumo_geral": "continua disponível"}
+    assert result.error_message == "embedding indisponível"

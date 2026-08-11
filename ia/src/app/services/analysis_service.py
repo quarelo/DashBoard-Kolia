@@ -128,6 +128,49 @@ def process_analysis_summaries(
         return analysis
 
 
+def process_analysis_embeddings(
+    db: Session, analysis_id: UUID
+) -> MeetingAnalysis:
+    analysis = db.get(MeetingAnalysis, analysis_id)
+    if analysis is None:
+        raise ValueError(f"Análise não encontrada: {analysis_id}")
+    if analysis.final_summary is None:
+        raise ValueError("A análise precisa estar pronta antes dos embeddings.")
+
+    try:
+        analysis.status = "EMBEDDING"
+        analysis.error_message = None
+        db.commit()
+        db.refresh(analysis)
+
+        for chunk in _analysis_chunks(db, analysis.id):
+            if chunk.embedding is not None:
+                continue
+            started_at = perf_counter()
+            chunk.embedding = generate_embedding(chunk.clean_content or chunk.content)
+            logger.info(
+                "analysis_id=%s chunk=%d embedding_seconds=%.3f",
+                analysis.id,
+                chunk.chunk_index,
+                perf_counter() - started_at,
+            )
+            db.commit()
+
+        analysis.status = "DONE"
+        db.commit()
+        db.refresh(analysis)
+        return analysis
+    except Exception as error:
+        logger.exception("analysis_id=%s embedding_failed", analysis.id)
+        db.rollback()
+        analysis = db.merge(analysis)
+        analysis.status = "DASHBOARD_READY_WITH_EMBEDDING_ERROR"
+        analysis.error_message = str(error)
+        db.commit()
+        db.refresh(analysis)
+        return analysis
+
+
 def analyze_meeting(db: Session, payload: AnalyzeRequest) -> MeetingAnalysis:
     analysis = prepare_analysis(db, payload)
     analysis = process_analysis_summaries(db, analysis.id)
@@ -138,27 +181,9 @@ def analyze_meeting(db: Session, payload: AnalyzeRequest) -> MeetingAnalysis:
         db.refresh(analysis)
         return analysis
 
-    try:
-        for chunk in _analysis_chunks(db, analysis.id):
-            started_at = perf_counter()
-            chunk.embedding = generate_embedding(chunk.clean_content or chunk.content)
-            logger.info(
-                "analysis_id=%s chunk=%d embedding_seconds=%.3f",
-                analysis.id,
-                chunk.chunk_index,
-                perf_counter() - started_at,
-            )
-            db.commit()
-        analysis.status = "DONE"
-        db.commit()
-        db.refresh(analysis)
-        return analysis
-    except Exception as error:
-        logger.exception("analysis_id=%s embedding_failed", analysis.id)
-        db.rollback()
-        analysis = db.merge(analysis)
+    analysis = process_analysis_embeddings(db, analysis.id)
+    if analysis.status == "DASHBOARD_READY_WITH_EMBEDDING_ERROR":
         analysis.status = "FAILED"
-        analysis.error_message = str(error)
         db.commit()
         db.refresh(analysis)
-        return analysis
+    return analysis
