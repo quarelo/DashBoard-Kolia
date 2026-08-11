@@ -5,15 +5,27 @@ from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.app.core.database import get_db, init_database
+from src.app.core.config import settings
+from src.app.core.database import SessionLocal, get_db, init_database
 from src.app.models.analysis import MeetingAnalysis, MeetingChunk
 from src.app.schemas.analysis import AnalysisDetailResponse, AnalyzeRequest, AnalyzeResponse, ChunkResponse
-from src.app.services.analysis_service import analyze_meeting
+from src.app.services.analysis_service import prepare_analysis
+from src.app.services.analysis_worker import AnalysisWorker
+
+analysis_worker = AnalysisWorker(
+    SessionLocal,
+    concurrency=settings.analysis_worker_concurrency,
+)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_database()
-    yield
+    analysis_worker.start()
+    analysis_worker.recover()
+    try:
+        yield
+    finally:
+        analysis_worker.stop()
 
 
 app = FastAPI(title="KOLIA IA Service", version="0.1.0", lifespan=lifespan)
@@ -29,9 +41,10 @@ def health():
     return {"status": "ok", "service": "kolia-ia-service"}
 
 
-@app.post("/analisar", response_model=AnalyzeResponse)
+@app.post("/analisar", response_model=AnalyzeResponse, status_code=202)
 def analisar(payload: AnalyzeRequest, db: Session = Depends(get_db)):
-    analysis = analyze_meeting(db, payload)
+    analysis = prepare_analysis(db, payload)
+    analysis_worker.submit(analysis.id)
     return AnalyzeResponse(analysis_id=analysis.id, meeting_id=analysis.external_meeting_id, status=analysis.status, total_tokens=analysis.total_tokens, total_chunks=analysis.total_chunks, final_summary=analysis.final_summary, error_message=analysis.error_message)
 
 

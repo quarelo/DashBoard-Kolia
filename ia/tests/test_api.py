@@ -33,20 +33,27 @@ def test_analisar_rejects_invalid_payload_before_database_access():
     assert response.status_code == 422
 
 
-def test_failed_analysis_response_exposes_error_message(monkeypatch):
+def test_analisar_returns_accepted_and_queues_analysis(monkeypatch):
+    analysis_id = UUID("66666666-6666-6666-6666-666666666666")
+    submitted = []
     app.dependency_overrides[get_db] = lambda: object()
     monkeypatch.setattr(
         main,
-        "analyze_meeting",
+        "prepare_analysis",
         lambda _db, payload: SimpleNamespace(
-            id=UUID("66666666-6666-6666-6666-666666666666"),
+            id=analysis_id,
             external_meeting_id=payload.meeting_id,
-            status="FAILED",
+            status="PROCESSING",
             total_tokens=7,
             total_chunks=1,
             final_summary=None,
-            error_message="JSON inválido",
+            error_message=None,
         ),
+    )
+    monkeypatch.setattr(
+        main,
+        "analysis_worker",
+        SimpleNamespace(submit=lambda current_id: submitted.append(current_id)),
     )
     try:
         response = client.post(
@@ -60,5 +67,27 @@ def test_failed_analysis_response_exposes_error_message(monkeypatch):
     finally:
         app.dependency_overrides.clear()
 
-    assert response.status_code == 200
-    assert response.json()["error_message"] == "JSON inválido"
+    assert response.status_code == 202
+    assert response.json()["status"] == "PROCESSING"
+    assert response.json()["final_summary"] is None
+    assert submitted == [analysis_id]
+
+
+def test_dashboard_ready_analysis_exposes_summary():
+    analysis = SimpleNamespace(
+        id=UUID("88888888-8888-8888-8888-888888888888"),
+        external_meeting_id=UUID("99999999-9999-9999-9999-999999999999"),
+        external_user_id=None,
+        title="Reunião pronta",
+        status="DASHBOARD_READY_WITH_EMBEDDING_ERROR",
+        total_tokens=10,
+        total_chunks=2,
+        final_summary={"resumo_geral": "Disponível"},
+        error_message="embedding indisponível",
+    )
+
+    response = main._detail(analysis)
+
+    assert response.status == "DASHBOARD_READY_WITH_EMBEDDING_ERROR"
+    assert response.final_summary == {"resumo_geral": "Disponível"}
+    assert response.error_message == "embedding indisponível"
