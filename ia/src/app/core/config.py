@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     ollama_chunk_num_predict: int = 768
     ollama_consolidation_think: bool = True
     ollama_consolidation_num_predict: int = 1024
+    ollama_generate_timeout_seconds: float = 600.0
+    ollama_embedding_timeout_seconds: float = 120.0
+    ollama_read_timeout_retries: int = 1
+    analysis_worker_concurrency: int = 1
     model: str = "qwen2.5:3b"
     embedding_model: str = "nomic-embed-text"
 

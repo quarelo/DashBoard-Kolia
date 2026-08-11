@@ -5,6 +5,7 @@ import pytest
 
 from src.app.core.config import settings
 from src.app.services.llm_service import (
+    OllamaError,
     OllamaModelNotFoundError,
     OllamaResponseError,
     consolidate_summaries,
@@ -107,3 +108,38 @@ def test_invalid_generation_json_is_rejected():
 
     with pytest.raises(OllamaResponseError, match="JSON inválido"):
         generate_chunk_summary("conteúdo", client=client)
+
+
+def test_generation_retries_one_read_timeout(monkeypatch):
+    monkeypatch.setattr(settings, "ollama_read_timeout_retries", 1)
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ReadTimeout("timed out", request=request)
+        return httpx.Response(
+            200,
+            json={"response": json.dumps({"resumo_chunk": "ok"})},
+        )
+
+    result = generate_chunk_summary("conteúdo", client=client_for(handler))
+
+    assert result["resumo_chunk"] == "ok"
+    assert attempts == 2
+
+
+def test_generation_reports_exhausted_read_timeout(monkeypatch):
+    monkeypatch.setattr(settings, "ollama_read_timeout_retries", 1)
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    with pytest.raises(OllamaError, match="timed out"):
+        generate_chunk_summary("conteúdo", client=client_for(handler))
+
+    assert attempts == 2

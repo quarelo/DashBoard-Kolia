@@ -68,13 +68,24 @@ def _post_json(
     client: httpx.Client | None,
     timeout: float,
 ) -> dict[str, Any]:
-    try:
-        if client is None:
-            response = httpx.post(url, json=payload, timeout=timeout)
-        else:
-            response = client.post(url, json=payload, timeout=timeout)
-    except httpx.HTTPError as error:
-        raise OllamaError(f"Não foi possível acessar o Ollama: {error}") from error
+    response = None
+    for attempt in range(settings.ollama_read_timeout_retries + 1):
+        try:
+            if client is None:
+                response = httpx.post(url, json=payload, timeout=timeout)
+            else:
+                response = client.post(url, json=payload, timeout=timeout)
+            break
+        except httpx.ReadTimeout as error:
+            if attempt >= settings.ollama_read_timeout_retries:
+                raise OllamaError(
+                    f"Não foi possível acessar o Ollama: {error}"
+                ) from error
+        except httpx.HTTPError as error:
+            raise OllamaError(f"Não foi possível acessar o Ollama: {error}") from error
+
+    if response is None:
+        raise OllamaError("O Ollama não retornou uma resposta.")
 
     try:
         data = response.json()
@@ -116,7 +127,7 @@ def _generate_json(
             },
         },
         client=client,
-        timeout=180,
+        timeout=settings.ollama_generate_timeout_seconds,
     )
     raw_response = data.get("response")
     if not isinstance(raw_response, str):
@@ -183,7 +194,7 @@ def generate_embedding(
         settings.ollama_embed_url,
         {"model": settings.embedding_model, "input": text},
         client=client,
-        timeout=120,
+        timeout=settings.ollama_embedding_timeout_seconds,
     )
     embeddings = data.get("embeddings")
     if not isinstance(embeddings, list) or not embeddings or not isinstance(embeddings[0], list):
