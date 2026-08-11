@@ -1,6 +1,8 @@
 import logging
 from time import perf_counter
+from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.app.core.config import settings
@@ -34,29 +36,76 @@ def build_single_chunk_final_summary(summary: dict) -> dict:
     }
 
 
-def analyze_meeting(db: Session, payload: AnalyzeRequest) -> MeetingAnalysis:
+def prepare_analysis(db: Session, payload: AnalyzeRequest) -> MeetingAnalysis:
+    transcription = sanitize_transcription(payload.transcription)
+    chunks = split_text_by_tokens(
+        transcription,
+        settings.max_tokens_per_chunk,
+        settings.overlap_tokens,
+    )
     analysis = MeetingAnalysis(external_meeting_id=payload.meeting_id, external_user_id=payload.user_id, title=payload.title, status="PROCESSING")
+    analysis.total_tokens = count_tokens(transcription)
+    analysis.total_chunks = len(chunks)
     db.add(analysis)
     db.commit()
     db.refresh(analysis)
+
+    for index, content in enumerate(chunks, start=1):
+        db.add(
+            MeetingChunk(
+                analysis_id=analysis.id,
+                external_meeting_id=payload.meeting_id,
+                external_user_id=payload.user_id,
+                chunk_index=index,
+                token_count=count_tokens(content),
+                content=content,
+                clean_content=clean_chunk_text(content),
+            )
+        )
+    db.commit()
+    db.refresh(analysis)
+    return analysis
+
+
+def _analysis_chunks(db: Session, analysis_id: UUID) -> list[MeetingChunk]:
+    statement = (
+        select(MeetingChunk)
+        .where(MeetingChunk.analysis_id == analysis_id)
+        .order_by(MeetingChunk.chunk_index.asc())
+    )
+    return list(db.execute(statement).scalars().all())
+
+
+def process_analysis_summaries(
+    db: Session, analysis_id: UUID
+) -> MeetingAnalysis:
+    analysis = db.get(MeetingAnalysis, analysis_id)
+    if analysis is None:
+        raise ValueError(f"Análise não encontrada: {analysis_id}")
+
     try:
-        transcription = sanitize_transcription(payload.transcription)
-        chunks = split_text_by_tokens(transcription, settings.max_tokens_per_chunk, settings.overlap_tokens)
-        analysis.total_tokens = count_tokens(transcription)
-        analysis.total_chunks = len(chunks)
+        analysis.status = "ANALYZING"
+        analysis.error_message = None
         db.commit()
         db.refresh(analysis)
+
+        chunks = _analysis_chunks(db, analysis_id)
         summaries = []
-        for index, content in enumerate(chunks, start=1):
-            clean_content = clean_chunk_text(content)
-            started_at = perf_counter()
-            summary = generate_chunk_summary(clean_content)
-            logger.info("analysis_id=%s chunk=%d summary_seconds=%.3f", analysis.id, index, perf_counter() - started_at)
-            started_at = perf_counter()
-            embedding = generate_embedding(clean_content)
-            logger.info("analysis_id=%s chunk=%d embedding_seconds=%.3f", analysis.id, index, perf_counter() - started_at)
-            db.add(MeetingChunk(analysis_id=analysis.id, external_meeting_id=payload.meeting_id, external_user_id=payload.user_id, chunk_index=index, token_count=count_tokens(content), content=content, clean_content=clean_content, chunk_summary=summary, embedding=embedding))
-            summaries.append(summary)
+        for chunk in chunks:
+            if chunk.chunk_summary is None:
+                started_at = perf_counter()
+                chunk.chunk_summary = generate_chunk_summary(
+                    chunk.clean_content or chunk.content
+                )
+                logger.info(
+                    "analysis_id=%s chunk=%d summary_seconds=%.3f",
+                    analysis.id,
+                    chunk.chunk_index,
+                    perf_counter() - started_at,
+                )
+                db.commit()
+            summaries.append(chunk.chunk_summary)
+
         if len(summaries) == 1:
             analysis.final_summary = build_single_chunk_final_summary(summaries[0])
             logger.info("analysis_id=%s single_chunk_consolidation=skipped", analysis.id)
@@ -64,12 +113,48 @@ def analyze_meeting(db: Session, payload: AnalyzeRequest) -> MeetingAnalysis:
             started_at = perf_counter()
             analysis.final_summary = consolidate_summaries(summaries)
             logger.info("analysis_id=%s consolidation_seconds=%.3f", analysis.id, perf_counter() - started_at)
-        analysis.status = "DONE"
+        analysis.status = "DASHBOARD_READY"
         db.commit()
         db.refresh(analysis)
         return analysis
     except Exception as error:
         logger.exception("analysis_id=%s failed", analysis.id)
+        db.rollback()
+        analysis = db.merge(analysis)
+        analysis.status = "FAILED_ANALYSIS"
+        analysis.error_message = str(error)
+        db.commit()
+        db.refresh(analysis)
+        return analysis
+
+
+def analyze_meeting(db: Session, payload: AnalyzeRequest) -> MeetingAnalysis:
+    analysis = prepare_analysis(db, payload)
+    analysis = process_analysis_summaries(db, analysis.id)
+    if analysis.status != "DASHBOARD_READY":
+        # Compatibility for the existing synchronous endpoint.
+        analysis.status = "FAILED"
+        db.commit()
+        db.refresh(analysis)
+        return analysis
+
+    try:
+        for chunk in _analysis_chunks(db, analysis.id):
+            started_at = perf_counter()
+            chunk.embedding = generate_embedding(chunk.clean_content or chunk.content)
+            logger.info(
+                "analysis_id=%s chunk=%d embedding_seconds=%.3f",
+                analysis.id,
+                chunk.chunk_index,
+                perf_counter() - started_at,
+            )
+            db.commit()
+        analysis.status = "DONE"
+        db.commit()
+        db.refresh(analysis)
+        return analysis
+    except Exception as error:
+        logger.exception("analysis_id=%s embedding_failed", analysis.id)
         db.rollback()
         analysis = db.merge(analysis)
         analysis.status = "FAILED"

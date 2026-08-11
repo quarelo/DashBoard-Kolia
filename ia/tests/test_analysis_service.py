@@ -25,6 +25,38 @@ class FakeSession:
     def merge(self, value):
         return value
 
+    def get(self, model, value_id):
+        return next(
+            (
+                value
+                for value in self.added
+                if isinstance(value, model) and value.id == value_id
+            ),
+            None,
+        )
+
+    def execute(self, _statement):
+        chunks = sorted(
+            (
+                value
+                for value in self.added
+                if isinstance(value, MeetingChunk)
+            ),
+            key=lambda chunk: chunk.chunk_index,
+        )
+        return FakeResult(chunks)
+
+
+class FakeResult:
+    def __init__(self, values):
+        self.values = values
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self.values
+
 
 def test_analyze_meeting_persists_real_ollama_results(monkeypatch):
     chunk_summary = {
@@ -103,3 +135,95 @@ def test_failed_analysis_keeps_counts_and_useful_error(monkeypatch):
     assert result.total_tokens == 6
     assert result.total_chunks == 1
     assert result.error_message == "JSON inválido"
+
+
+def test_prepare_analysis_persists_chunks_without_calling_ollama(monkeypatch):
+    monkeypatch.setattr(
+        analysis_service,
+        "generate_chunk_summary",
+        lambda _text: (_ for _ in ()).throw(
+            AssertionError("preparation must not call Ollama")
+        ),
+    )
+    session = FakeSession()
+    payload = AnalyzeRequest(
+        meeting_id=UUID("77777777-7777-7777-7777-777777777777"),
+        user_id=None,
+        title="Reunião preparada",
+        transcription="Primeiro fato. Segundo fato.",
+    )
+
+    result = analysis_service.prepare_analysis(session, payload)
+
+    stored_chunks = [
+        value for value in session.added if isinstance(value, MeetingChunk)
+    ]
+    assert result.status == "PROCESSING"
+    assert len(stored_chunks) == result.total_chunks == 1
+    assert stored_chunks[0].chunk_summary is None
+    assert stored_chunks[0].embedding is None
+
+
+def test_resume_summaries_skips_completed_chunks(monkeypatch):
+    analysis_id = uuid4()
+    analysis = MeetingAnalysis(
+        id=analysis_id,
+        external_meeting_id=uuid4(),
+        title="Retomada",
+        status="ANALYZING",
+        total_tokens=4,
+        total_chunks=2,
+    )
+    complete = {
+        "resumo_chunk": "já pronto",
+        "temas_discutidos": [],
+        "problemas_identificados": [],
+        "decisoes_tomadas": [],
+        "duvidas_em_aberto": [],
+        "oportunidades_insights": [],
+        "evidencias_importantes": [],
+        "metricas_negocio": {},
+        "acoes_recomendadas": [],
+    }
+    pending = MeetingChunk(
+        analysis_id=analysis_id,
+        external_meeting_id=analysis.external_meeting_id,
+        chunk_index=2,
+        token_count=2,
+        content="chunk dois",
+        clean_content="chunk dois",
+    )
+    session = FakeSession()
+    session.added.extend(
+        [
+            analysis,
+            MeetingChunk(
+                analysis_id=analysis_id,
+                external_meeting_id=analysis.external_meeting_id,
+                chunk_index=1,
+                token_count=2,
+                content="chunk um",
+                clean_content="chunk um",
+                chunk_summary=complete,
+            ),
+            pending,
+        ]
+    )
+    calls = []
+    monkeypatch.setattr(
+        analysis_service,
+        "generate_chunk_summary",
+        lambda text: calls.append(text) or {**complete, "resumo_chunk": text},
+    )
+    monkeypatch.setattr(
+        analysis_service,
+        "consolidate_summaries",
+        lambda summaries: {"resumo_geral": ", ".join(s["resumo_chunk"] for s in summaries)},
+    )
+
+    result = analysis_service.process_analysis_summaries(session, analysis_id)
+
+    assert calls == ["chunk dois"]
+    assert pending.chunk_summary["resumo_chunk"] == "chunk dois"
+    assert result.status == "DASHBOARD_READY"
+    assert result.final_summary == {"resumo_geral": "já pronto, chunk dois"}
