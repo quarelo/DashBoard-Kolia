@@ -99,7 +99,7 @@ cd "$PROJECT_ROOT"
 printf 'Iniciando o Ollama...\n'
 docker compose up -d ollama
 
-generation_model=$(read_env_value OLLAMA_MODEL "qwen2.5:3b")
+generation_model=$(read_env_value OLLAMA_MODEL "gemma3:1b")
 embedding_model=$(read_env_value EMBEDDING_MODEL "nomic-embed-text")
 
 ensure_model OLLAMA_MODEL "Modelo de análise" "$generation_model"

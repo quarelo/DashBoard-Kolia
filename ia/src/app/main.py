@@ -8,9 +8,13 @@ from sqlalchemy.orm import Session
 from src.app.core.config import settings
 from src.app.core.database import SessionLocal, get_db, init_database
 from src.app.models.analysis import MeetingAnalysis, MeetingChunk
-from src.app.schemas.analysis import AnalysisDetailResponse, AnalyzeRequest, AnalyzeResponse, ChunkResponse
-from src.app.services.analysis_service import prepare_analysis
+from src.app.schemas.analysis import (
+    AnalysisDetailResponse, AnalyzeRequest, AnalyzeResponse, ChunkResponse,
+    SemanticSearchRequest, SemanticSearchResponse,
+)
+from src.app.services.analysis_service import build_analysis_progress, prepare_analysis
 from src.app.services.analysis_worker import AnalysisWorker
+from src.app.services.rag_service import RagNotReadyError, search_analysis_chunks
 
 analysis_worker = AnalysisWorker(
     SessionLocal,
@@ -45,11 +49,22 @@ def health():
 def analisar(payload: AnalyzeRequest, db: Session = Depends(get_db)):
     analysis = prepare_analysis(db, payload)
     analysis_worker.submit(analysis.id)
-    return AnalyzeResponse(analysis_id=analysis.id, meeting_id=analysis.external_meeting_id, status=analysis.status, total_tokens=analysis.total_tokens, total_chunks=analysis.total_chunks, final_summary=analysis.final_summary, error_message=analysis.error_message)
+    progress = build_analysis_progress(analysis, [])
+    return AnalyzeResponse(analysis_id=analysis.id, meeting_id=analysis.external_meeting_id, status=analysis.status, total_tokens=analysis.total_tokens, final_summary=analysis.final_summary, error_message=analysis.error_message, **progress)
 
 
-def _detail(analysis: MeetingAnalysis) -> AnalysisDetailResponse:
-    return AnalysisDetailResponse(analysis_id=analysis.id, meeting_id=analysis.external_meeting_id, user_id=analysis.external_user_id, title=analysis.title, status=analysis.status, total_tokens=analysis.total_tokens, total_chunks=analysis.total_chunks, final_summary=analysis.final_summary, error_message=analysis.error_message)
+def _detail(
+    analysis: MeetingAnalysis, chunks: list[MeetingChunk]
+) -> AnalysisDetailResponse:
+    progress = build_analysis_progress(analysis, chunks)
+    return AnalysisDetailResponse(analysis_id=analysis.id, meeting_id=analysis.external_meeting_id, user_id=analysis.external_user_id, title=analysis.title, status=analysis.status, total_tokens=analysis.total_tokens, final_summary=analysis.final_summary, error_message=analysis.error_message, **progress)
+
+
+def _chunks_for_analysis(db: Session, analysis_id: UUID) -> list[MeetingChunk]:
+    statement = select(MeetingChunk).where(
+        MeetingChunk.analysis_id == analysis_id
+    ).order_by(MeetingChunk.chunk_index.asc())
+    return list(db.execute(statement).scalars().all())
 
 
 @app.get("/analises/{analysis_id}", response_model=AnalysisDetailResponse)
@@ -57,7 +72,7 @@ def get_analysis(analysis_id: UUID, db: Session = Depends(get_db)):
     analysis = db.get(MeetingAnalysis, analysis_id)
     if not analysis:
         raise HTTPException(status_code=404, detail="Análise não encontrada.")
-    return _detail(analysis)
+    return _detail(analysis, _chunks_for_analysis(db, analysis.id))
 
 
 @app.get("/analises/by-meeting/{meeting_id}", response_model=AnalysisDetailResponse)
@@ -66,7 +81,7 @@ def get_analysis_by_meeting(meeting_id: UUID, db: Session = Depends(get_db)):
     analysis = db.execute(statement).scalar_one_or_none()
     if not analysis:
         raise HTTPException(status_code=404, detail="Análise não encontrada para esta reunião.")
-    return _detail(analysis)
+    return _detail(analysis, _chunks_for_analysis(db, analysis.id))
 
 
 @app.get("/analises/{analysis_id}/chunks", response_model=list[ChunkResponse])
@@ -76,3 +91,22 @@ def list_chunks(analysis_id: UUID, db: Session = Depends(get_db)):
     statement = select(MeetingChunk).where(MeetingChunk.analysis_id == analysis_id).order_by(MeetingChunk.chunk_index.asc())
     chunks = db.execute(statement).scalars().all()
     return [ChunkResponse(id=chunk.id, chunk_index=chunk.chunk_index, token_count=chunk.token_count, content=chunk.content, clean_content=chunk.clean_content, chunk_summary=chunk.chunk_summary) for chunk in chunks]
+
+
+@app.post(
+    "/analises/{analysis_id}/buscar",
+    response_model=SemanticSearchResponse,
+)
+def semantic_search(
+    analysis_id: UUID,
+    payload: SemanticSearchRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return search_analysis_chunks(
+            db, analysis_id, payload.query, payload.top_k
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except RagNotReadyError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error

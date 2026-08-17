@@ -86,8 +86,53 @@ def test_dashboard_ready_analysis_exposes_summary():
         error_message="embedding indisponível",
     )
 
-    response = main._detail(analysis)
+    chunks = [
+        SimpleNamespace(chunk_summary={"pontos_chave": ["fato"]}),
+        SimpleNamespace(chunk_summary=None),
+    ]
+    response = main._detail(analysis, chunks)
 
     assert response.status == "DASHBOARD_READY_WITH_EMBEDDING_ERROR"
     assert response.final_summary == {"resumo_geral": "Disponível"}
     assert response.error_message == "embedding indisponível"
+    assert response.processed_chunks == 1
+    assert response.total_chunks == 2
+    assert response.progress_percent == 50.0
+    assert response.summary_progress_percent == 50.0
+    assert response.embedding_progress_percent == 0.0
+    assert response.summary_stage == "PARTIAL"
+    assert response.summary_is_final is False
+    assert response.is_partial is True
+    assert response.estimated_seconds_remaining is None
+
+
+def test_semantic_search_returns_ranked_evidence(monkeypatch):
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    app.dependency_overrides[get_db] = lambda: object()
+    monkeypatch.setattr(
+        main,
+        "search_analysis_chunks",
+        lambda _db, current_id, query, top_k: {
+            "analysis_id": current_id,
+            "query": query,
+            "ready": True,
+            "results": [{
+                "chunk_id": UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                "chunk_index": 7,
+                "excerpt": "substituição de 27 máquinas",
+                "similarity": 0.91,
+            }],
+        },
+    )
+    try:
+        response = client.post(
+            f"/analises/{analysis_id}/buscar",
+            json={"query": "quantas máquinas precisam ser trocadas?", "top_k": 3},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["ready"] is True
+    assert response.json()["results"][0]["chunk_index"] == 7
+    assert response.json()["results"][0]["similarity"] == 0.91

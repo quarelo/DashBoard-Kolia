@@ -19,9 +19,11 @@ _RECOVERABLE_STATUSES = (
     "ANALYZING",
     "DASHBOARD_READY",
     "EMBEDDING",
-    "FAILED_ANALYSIS",
-    "DASHBOARD_READY_WITH_EMBEDDING_ERROR",
 )
+
+
+def is_recoverable_status(status: str) -> bool:
+    return status in _RECOVERABLE_STATUSES
 
 
 class AnalysisWorker:
@@ -88,7 +90,7 @@ class AnalysisWorker:
                 analysis = session.get(MeetingAnalysis, analysis_id)
                 if analysis is None:
                     continue
-                if analysis.final_summary is None:
+                if not getattr(analysis, "summary_is_final", False):
                     analysis = process_analysis_summaries(session, analysis_id)
                 if analysis.status in {
                     "DASHBOARD_READY",

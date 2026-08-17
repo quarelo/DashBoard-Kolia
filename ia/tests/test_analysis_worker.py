@@ -13,6 +13,20 @@ class FakeSession:
         pass
 
 
+def test_only_interrupted_states_are_recovered_automatically():
+    assert analysis_worker.is_recoverable_status("PROCESSING") is True
+    assert analysis_worker.is_recoverable_status("ANALYZING") is True
+    assert analysis_worker.is_recoverable_status("DASHBOARD_READY") is True
+    assert analysis_worker.is_recoverable_status("EMBEDDING") is True
+    assert analysis_worker.is_recoverable_status("FAILED_ANALYSIS") is False
+    assert (
+        analysis_worker.is_recoverable_status(
+            "DASHBOARD_READY_WITH_EMBEDDING_ERROR"
+        )
+        is False
+    )
+
+
 def test_worker_serializes_ollama_jobs(monkeypatch):
     first_id = uuid4()
     second_id = uuid4()
