@@ -38,8 +38,8 @@ services:
     environment:
       PORT: 3000
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-kolia}:${POSTGRES_PASSWORD:-kolia}@postgres:5432/${POSTGRES_DB:-kolia}
-      MAX_TOKENS_PER_CHUNK: ${MAX_TOKENS_PER_CHUNK:-1000}
-      OVERLAP_TOKENS: ${OVERLAP_TOKENS:-0}
+      MAX_TOKENS_PER_CHUNK: ${MAX_TOKENS_PER_CHUNK:-2000}
+      OVERLAP_TOKENS: ${OVERLAP_TOKENS:-120}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
       OLLAMA_GENERATE_URL: http://ollama:11434/api/generate
       OLLAMA_EMBED_URL: http://ollama:11434/api/embed

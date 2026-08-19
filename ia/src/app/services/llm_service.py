@@ -19,10 +19,15 @@ class OllamaResponseError(OllamaError):
     pass
 
 
-_CHUNK_CATEGORY_ALIASES = {"DÚVIDAS": "DÚVIDA"}
+_CHUNK_CATEGORY_ALIASES = {
+    "DÚVIDAS": "DÚVIDA",
+    "OPORTUNIDADES": "OPORTUNIDADE",
+    "PRODUTOS": "PRODUTO",
+}
 _CHUNK_CATEGORIES = {
-    "DECISÃO", "AÇÃO", "PRAZO", "VALOR", "PROBLEMA", "DÚVIDA",
-    "EVIDÊNCIA", "INSIGHT",
+    "PRODUTO", "PERSONA", "SENTIMENTO", "CHURN", "OPORTUNIDADE",
+    "BUDGET", "GAP", "PROBLEMA", "FEEDBACK", "DÚVIDA", "AÇÃO",
+    "EVIDÊNCIA",
 }
 
 
@@ -38,7 +43,7 @@ def _normalize_chunk_summary(summary: dict[str, Any]) -> dict[str, Any]:
         fact = fact.strip()
         if category in _CHUNK_CATEGORIES and fact:
             normalized.append(f"{category}: {fact}")
-        if len(normalized) == 4:
+        if len(normalized) == 12:
             break
     return {"pontos_chave": normalized}
 
@@ -63,15 +68,66 @@ def _salvage_chunk_summary(raw: str) -> dict[str, Any] | None:
 
 
 def _extract_deterministic_chunk_points(text: str) -> list[str]:
-    points = []
+    points: list[str] = []
+
+    def add(category: str, fact: str) -> None:
+        compact = " ".join(fact.split()).strip(" ,.;:")
+        point = f"{category}: {compact}"
+        if compact and point not in points:
+            points.append(point)
+
     for match in re.finditer(
-        r"\b(CRM)\s+para\s+(\d+)\s+(pessoas|usuários|licenças)\b",
+        r"\bTOTVS\s+(ERP|CRM|Fluig|Protheus|Datasul|RM|WMS)\b",
         text,
         re.IGNORECASE,
     ):
-        points.append(
-            f"VALOR: {match.group(1).upper()} para {match.group(2)} "
-            f"{match.group(3).lower()}"
+        add("PRODUTO", f"TOTVS {match.group(1).upper()}")
+
+    for match in re.finditer(
+        r"\[(?:CLIENTE|TOTVS)\s*-\s*([^\]]{2,80})\]", text, re.IGNORECASE
+    ):
+        add("PERSONA", match.group(1))
+
+    dissatisfaction = re.search(
+        r"\b(insatisfeit[oa]s?\s+com\s+[^.;!?]{2,100})", text, re.IGNORECASE
+    )
+    if dissatisfaction:
+        add("SENTIMENTO", dissatisfaction.group(1))
+        add("FEEDBACK", dissatisfaction.group(1))
+
+    churn = re.search(
+        r"\b(podemos\s+cancelar\s+se\s+[^.;!?]{2,120})", text, re.IGNORECASE
+    )
+    if churn:
+        add("CHURN", churn.group(1))
+
+    gap = re.search(
+        r"\b(?:precisamos?|necessitamos?)\s+([^.;!?]{2,120}recurso\s+que\s+"
+        r"não\s+(?:encontramos|existe|temos)[^.;!?]{0,80})",
+        text,
+        re.IGNORECASE,
+    )
+    if gap:
+        add("GAP", gap.group(1))
+
+    for match in re.finditer(
+        r"R\$\s*\d[\d.]*(?:,\d+)?(?:\s*(?:mil|milh(?:ão|ões)))?",
+        text,
+        re.IGNORECASE,
+    ):
+        add("BUDGET", match.group(0))
+
+    for match in re.finditer(r"(?:^|[.!]\s+)([^.!?]{2,180}\?)", text):
+        add("DÚVIDA", match.group(1))
+
+    for match in re.finditer(
+        r"\b(CRM)\s+para\s+(\d+)\s+(pessoas|usuários|licenças|vendedores)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        add(
+            "OPORTUNIDADE",
+            f"{match.group(1).upper()} para {match.group(2)} {match.group(3).lower()}",
         )
 
     weekday_pattern = (
@@ -90,8 +146,8 @@ def _extract_deterministic_chunk_points(text: str) -> list[str]:
         action = " ".join(action.split()).strip(" ,.;:")
         weekday = re.sub(r"\s*-\s*", "-", match.group(2).lower())
         if action:
-            points.append(f"PRAZO: {action} na {weekday}")
-    return points[:2]
+            add("AÇÃO", f"{action} na {weekday}")
+    return points[:12]
 
 
 def _extract_json_object(raw: str) -> dict[str, Any] | None:
@@ -120,14 +176,14 @@ CHUNK_SUMMARY_SCHEMA = {
             "type": "array",
             "items": {
                 "type": "string",
-                "maxLength": 100,
+                "maxLength": 180,
                 "pattern": (
-                    "^(DECISÃO|AÇÃO|PRAZO|VALOR|PROBLEMA|DÚVIDA|"
-                    "EVIDÊNCIA|INSIGHT): .+$"
+                    "^(PRODUTO|PERSONA|SENTIMENTO|CHURN|OPORTUNIDADE|BUDGET|"
+                    "GAP|PROBLEMA|FEEDBACK|DÚVIDA|AÇÃO|EVIDÊNCIA): .+$"
                 ),
             },
             "minItems": 1,
-            "maxItems": 4,
+            "maxItems": 12,
         },
     },
     "required": ["pontos_chave"],
@@ -140,39 +196,70 @@ FINAL_LIST_SCHEMA = {
     "maxItems": 3,
 }
 
+EVIDENCE_SCHEMA = {
+    "type": "array",
+    "maxItems": 24,
+    "items": {
+        "type": "object",
+        "properties": {
+            "categoria": {"type": "string", "maxLength": 50},
+            "insight": {"type": "string", "maxLength": 180},
+            "trecho": {"type": "string", "maxLength": 300},
+        },
+        "required": ["categoria", "insight", "trecho"],
+        "additionalProperties": False,
+    },
+}
+
+SCORE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "justificativa": {"type": "string", "maxLength": 240},
+    },
+    "required": ["score", "justificativa"],
+    "additionalProperties": False,
+}
+
 FINAL_SUMMARY_SCHEMA = {
     "type": "object",
     "properties": {
-        "resumo_geral": {"type": "string", "maxLength": 600},
-        "temas_agrupados": {
-            "type": "array",
-            "maxItems": 3,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "tema": {"type": "string", "maxLength": 100},
-                    "pontos": FINAL_LIST_SCHEMA,
-                },
-                "required": ["tema", "pontos"],
-                "additionalProperties": False,
-            },
-        },
-        "problemas_identificados": FINAL_LIST_SCHEMA,
-        "decisoes_tomadas": FINAL_LIST_SCHEMA,
-        "duvidas_em_aberto": FINAL_LIST_SCHEMA,
-        "oportunidades_insights": FINAL_LIST_SCHEMA,
-        "evidencias_importantes": FINAL_LIST_SCHEMA,
-        "metricas_negocio": {
+        "produto": FINAL_LIST_SCHEMA,
+        "persona": FINAL_LIST_SCHEMA,
+        "sentimento": {
             "type": "object",
-            "additionalProperties": {"type": ["string", "number"]},
-            "maxProperties": 4,
+            "properties": {
+                "classificacao": {"type": "string", "enum": ["positivo", "neutro", "negativo", "misto", "não identificado"]},
+                "justificativa": {"type": "string", "maxLength": 240},
+            },
+            "required": ["classificacao", "justificativa"],
+            "additionalProperties": False,
         },
-        "acoes_recomendadas": FINAL_LIST_SCHEMA,
+        "risco_churn": SCORE_SCHEMA,
+        "oportunidade_comercial": FINAL_LIST_SCHEMA,
+        "score_oportunidade": SCORE_SCHEMA,
+        "budget": {
+            "type": "object",
+            "properties": {
+                "identificado": {"type": "boolean"},
+                "valor": {"type": "string", "maxLength": 180},
+                "contexto": {"type": "string", "maxLength": 240},
+            },
+            "required": ["identificado", "valor", "contexto"],
+            "additionalProperties": False,
+        },
+        "gap_produto": FINAL_LIST_SCHEMA,
+        "problemas_identificados": FINAL_LIST_SCHEMA,
+        "feedback_produto": FINAL_LIST_SCHEMA,
+        "evidencias": EVIDENCE_SCHEMA,
+        "recomendacao_acao": FINAL_LIST_SCHEMA,
+        "duvidas_em_aberto": FINAL_LIST_SCHEMA,
     },
     "required": [
-        "resumo_geral", "temas_agrupados", "problemas_identificados",
-        "decisoes_tomadas", "duvidas_em_aberto", "oportunidades_insights",
-        "evidencias_importantes", "metricas_negocio", "acoes_recomendadas",
+        "produto", "persona", "sentimento", "risco_churn",
+        "oportunidade_comercial", "score_oportunidade", "budget",
+        "gap_produto", "problemas_identificados", "feedback_produto",
+        "evidencias", "recomendacao_acao", "duvidas_em_aberto",
     ],
     "additionalProperties": False,
 }
@@ -208,7 +295,7 @@ def complete_missing_fields(
         prompt,
         missing_schema,
         False,
-        min(settings.ollama_consolidation_num_predict, 384),
+        max(settings.ollama_consolidation_num_predict, 768),
         settings.consolidation_model,
         client=client,
     )
@@ -363,9 +450,11 @@ def generate_chunk_summary(
 ) -> dict[str, Any]:
     prompt = f"""Você é um especialista em análise de reuniões corporativas.
 Analise somente o trecho e retorne JSON apenas com pontos_chave.
-Use no máximo 4 pontos muito curtos. Prefixe cada
-ponto com exatamente uma categoria entre DECISÃO, AÇÃO, PRAZO, VALOR,
-PROBLEMA, DÚVIDA, EVIDÊNCIA ou INSIGHT, seguida de dois-pontos e do fato concreto.
+Use no máximo 6 pontos curtos. Prefixe cada ponto com exatamente uma categoria
+entre PRODUTO, PERSONA, SENTIMENTO, CHURN, OPORTUNIDADE, BUDGET, GAP,
+PROBLEMA, FEEDBACK, DÚVIDA, AÇÃO ou EVIDÊNCIA, seguida de dois-pontos e do
+fato concreto. OPORTUNIDADE é venda ou expansão de item já existente no
+portfólio TOTVS; GAP é necessidade que o portfólio atual não atende.
 Nunca devolva apenas nomes de categorias. Preserve nomes, números e negações.
 Copie apenas ações explicitamente mencionadas; não crie novas ações. O trecho
 contém fatos relevantes: extraia pelo menos um deles. Não invente fatos.
@@ -390,7 +479,7 @@ TRECHO:
     for point in [*deterministic, *normalized["pontos_chave"]]:
         if point not in merged:
             merged.append(point)
-        if len(merged) == 4:
+        if len(merged) == 12:
             break
     return {"pontos_chave": merged}
 
@@ -400,10 +489,14 @@ def consolidate_summaries(
 ) -> dict[str, Any]:
     summaries_json = json.dumps(chunk_summaries, ensure_ascii=False)
     prompt = f"""Você é um especialista em análise de reuniões corporativas.
-Consolide os resumos parciais abaixo em um único objeto JSON válido com estas chaves:
-resumo_geral, temas_agrupados, problemas_identificados, decisoes_tomadas,
-duvidas_em_aberto, oportunidades_insights, evidencias_importantes,
-metricas_negocio e acoes_recomendadas. Remova duplicações e não invente fatos.
+Consolide os resumos parciais em um objeto JSON com exatamente as chaves do
+schema. Identifique produto TOTVS, persona profissional, sentimento, risco de
+churn (0-100), oportunidade comercial apenas para algo existente no portfólio,
+score da oportunidade (0-100), budget, gaps, problemas, feedback, evidências,
+recomendações e dúvidas em aberto. Em evidencias, associe cada insight a um
+trecho literal disponível nos resumos. Quando não houver informação, use lista
+vazia, score 0, "não identificado" ou identificado=false. Remova duplicações
+e não invente fatos.
 Os resumos parciais contêm pontos prefixados por categoria; transforme os fatos
 concretos nos campos finais e descarte qualquer item que seja apenas um rótulo.
 

@@ -16,7 +16,6 @@ from src.app.services.chunk_service import (
     clean_chunk_text,
     clean_transcription,
     sanitize_transcription,
-    rank_chunk_indices_for_partial,
 )
 from src.app.services.llm_service import (
     consolidate_summaries,
@@ -35,6 +34,13 @@ _CRITICAL_FACT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _QUANTIFIED_VALUE_PATTERN = re.compile(r"(?:R\$|\d)", re.IGNORECASE)
+_FINANCIAL_VALUE_PATTERN = re.compile(
+    r"(?:R\$|reais?|milh(?:ão|ões))", re.IGNORECASE
+)
+_CHURN_SIGNAL_PATTERN = re.compile(
+    r"(?:cancel|churn|insatisfeit|risco de perder|não retid|deixar de|encerrar)",
+    re.IGNORECASE,
+)
 _BUSINESS_METRIC_PATTERN = re.compile(
     r"\b(?:licenças?|usuários?|pessoas?|máquinas?|equipamentos?|crm|cloud)\b",
     re.IGNORECASE,
@@ -92,10 +98,6 @@ def build_preliminary_summary(transcription: str) -> dict:
         ),
     )
     selected = [text for _index, text in ranked[:30]]
-    decisions = [
-        text for text in selected
-        if re.search(r"\b(?:decid|defin|combin|aprov)\w*", text, re.IGNORECASE)
-    ][:8]
     actions = [
         text for text in selected
         if re.search(r"\b(?:enviar|entregar|fazer|agendar|substitu|refazer|vamos)\w*", text, re.IGNORECASE)
@@ -104,25 +106,32 @@ def build_preliminary_summary(transcription: str) -> dict:
         text for text in selected
         if re.search(r"\b(?:problema|erro|risco|dúvida|pendente|não|sem)\w*", text, re.IGNORECASE)
     ][:8]
-    deadlines = [text for text in selected if _EXPLICIT_DEADLINE_PATTERN.search(text)][:8]
-    quantified = [text for text in selected if _QUANTIFIED_VALUE_PATTERN.search(text)][:12]
+    quantified = [text for text in selected if _FINANCIAL_VALUE_PATTERN.search(text)][:12]
 
     return {
-        "resumo_geral": "; ".join(selected[:10]),
-        "temas_agrupados": (
-            [{"tema": "Prévia automática", "pontos": selected[:12]}]
-            if selected else []
-        ),
-        "problemas_identificados": problems,
-        "decisoes_tomadas": decisions,
-        "duvidas_em_aberto": [],
-        "oportunidades_insights": [],
-        "evidencias_importantes": selected[:30],
-        "metricas_negocio": {
-            **({"valores": "; ".join(quantified)} if quantified else {}),
-            **({"prazos": "; ".join(deadlines)} if deadlines else {}),
+        "produto": [],
+        "persona": [],
+        "sentimento": {
+            "classificacao": "não identificado",
+            "justificativa": "Aguardando análise semântica completa.",
         },
-        "acoes_recomendadas": actions,
+        "risco_churn": {"score": 0, "justificativa": "Aguardando análise semântica completa."},
+        "oportunidade_comercial": [],
+        "score_oportunidade": {"score": 0, "justificativa": "Aguardando análise semântica completa."},
+        "budget": {
+            "identificado": bool(quantified),
+            "valor": "; ".join(quantified),
+            "contexto": "Valores ou quantidades encontrados na transcrição." if quantified else "Não identificado.",
+        },
+        "gap_produto": [],
+        "problemas_identificados": problems,
+        "feedback_produto": [],
+        "evidencias": [
+            {"categoria": "prévia", "insight": text, "trecho": text}
+            for text in selected[:12]
+        ],
+        "recomendacao_acao": actions,
+        "duvidas_em_aberto": [],
     }
 
 
@@ -130,10 +139,9 @@ def build_deterministic_chunk_summary(text: str) -> dict:
     preview = build_preliminary_summary(text)
     points: list[str] = []
     categories = (
-        ("DECISÃO", preview["decisoes_tomadas"]),
-        ("AÇÃO", preview["acoes_recomendadas"]),
+        ("AÇÃO", preview["recomendacao_acao"]),
         ("PROBLEMA", preview["problemas_identificados"]),
-        ("EVIDÊNCIA", preview["evidencias_importantes"]),
+        ("EVIDÊNCIA", [item["trecho"] for item in preview["evidencias"]]),
     )
     seen = set()
     for category, facts in categories:
@@ -142,17 +150,12 @@ def build_deterministic_chunk_summary(text: str) -> dict:
             if normalized not in seen:
                 points.append(f"{category}: {fact}")
                 seen.add(normalized)
-    metric_categories = (("VALOR", "valores"), ("PRAZO", "prazos"))
-    for category, key in metric_categories:
-        for fact in preview["metricas_negocio"].get(key, "").split("; "):
-            fact = fact.strip()
-            categorized = f"{category}: {fact}"
-            if fact and categorized.casefold() not in {
-                point.casefold() for point in points
-            }:
-                points.append(categorized)
+    if preview["budget"]["identificado"]:
+        for fact in preview["budget"]["valor"].split("; "):
+            if fact:
+                points.append(f"BUDGET: {fact}")
     return {
-        "resumo_chunk": preview["resumo_geral"],
+        "resumo_chunk": "; ".join(item["trecho"] for item in preview["evidencias"]),
         "temas_discutidos": ["Evidências da transcrição"] if points else [],
         "pontos_chave": points,
     }
@@ -294,16 +297,18 @@ def build_analysis_progress(
 
 def build_compact_final_summary(chunk_summaries: list[dict]) -> dict:
     grouped = {
-        "DECISÃO": [], "AÇÃO": [], "PRAZO": [], "VALOR": [],
-        "PROBLEMA": [], "DÚVIDA": [], "EVIDÊNCIA": [], "INSIGHT": [],
+        "PRODUTO": [], "PERSONA": [], "SENTIMENTO": [], "CHURN": [],
+        "OPORTUNIDADE": [], "BUDGET": [], "GAP": [], "PROBLEMA": [],
+        "FEEDBACK": [], "DÚVIDA": [], "AÇÃO": [], "EVIDÊNCIA": [],
     }
-    all_facts = []
     structured_fields = {
         "problemas_identificados": "PROBLEMA",
-        "decisoes_tomadas": "DECISÃO",
         "duvidas_em_aberto": "DÚVIDA",
-        "oportunidades_insights": "INSIGHT",
-        "evidencias_importantes": "EVIDÊNCIA",
+        "oportunidade_comercial": "OPORTUNIDADE",
+        "gap_produto": "GAP",
+        "feedback_produto": "FEEDBACK",
+        "recomendacao_acao": "AÇÃO",
+        # Compatibilidade com chunks persistidos antes do novo contrato.
         "acoes_recomendadas": "AÇÃO",
     }
     for summary in chunk_summaries:
@@ -314,7 +319,6 @@ def build_compact_final_summary(chunk_summaries: list[dict]) -> dict:
                 fact = _bound_summary_fact(value)
                 if fact and fact not in grouped[category]:
                     grouped[category].append(fact)
-                    all_facts.append(fact)
         for point in summary.get("pontos_chave", []):
             if not isinstance(point, str):
                 continue
@@ -322,46 +326,72 @@ def build_compact_final_summary(chunk_summaries: list[dict]) -> dict:
                 fact = point.strip()
                 if fact and fact not in grouped["EVIDÊNCIA"]:
                     grouped["EVIDÊNCIA"].append(fact)
-                    all_facts.append(fact)
                 continue
             prefix, fact = point.split(":", 1)
             prefix = prefix.strip().upper()
             fact = _bound_summary_fact(fact)
             if prefix in grouped and fact and fact not in grouped[prefix]:
                 grouped[prefix].append(fact)
-                all_facts.append(fact)
 
-    metrics = {}
-    quantified_values = [
-        fact for fact in grouped["VALOR"]
-        if _QUANTIFIED_VALUE_PATTERN.search(fact)
+    budget_facts = [
+        fact for fact in grouped["BUDGET"]
+        if _FINANCIAL_VALUE_PATTERN.search(fact)
     ]
-    explicit_deadlines = [
-        fact for fact in grouped["PRAZO"]
-        if _EXPLICIT_DEADLINE_PATTERN.search(fact)
+    grouped["CHURN"] = [
+        fact for fact in grouped["CHURN"]
+        if _CHURN_SIGNAL_PATTERN.search(fact)
     ]
-    if quantified_values:
-        metrics["valores"] = "; ".join(
-            _select_metric_facts(quantified_values, 30)
-        )
-    if explicit_deadlines:
-        metrics["prazos"] = "; ".join(
-            _select_metric_facts(explicit_deadlines, 30)
-        )
-    theme_points = _select_critical_facts(all_facts, 3)
+    opportunities = _select_critical_facts(grouped["OPORTUNIDADE"], 3)
+    churn_signals = _select_critical_facts(grouped["CHURN"], 3)
+    sentiment_facts = grouped["SENTIMENTO"]
+    sentiment_text = " ".join(sentiment_facts).casefold()
+    if any(word in sentiment_text for word in ("negativ", "insatisfeit", "frustr")):
+        sentiment = "negativo"
+    elif any(word in sentiment_text for word in ("positiv", "satisfeit", "gost")):
+        sentiment = "positivo"
+    elif sentiment_facts:
+        sentiment = "neutro"
+    else:
+        sentiment = "não identificado"
+    evidence = []
+    for category, facts in grouped.items():
+        for fact in facts:
+            evidence.append({
+                "categoria": category.casefold(),
+                "insight": fact,
+                "trecho": fact,
+            })
+            if len(evidence) == 24:
+                break
+        if len(evidence) == 24:
+            break
     return {
-        "resumo_geral": "; ".join(_select_critical_facts(all_facts, 5)),
-        "temas_agrupados": (
-            [{"tema": "Pontos principais", "pontos": theme_points}]
-            if theme_points else []
-        ),
+        "produto": _select_critical_facts(grouped["PRODUTO"], 3),
+        "persona": _select_critical_facts(grouped["PERSONA"], 3),
+        "sentimento": {
+            "classificacao": sentiment,
+            "justificativa": "; ".join(sentiment_facts[:3]) or "Não identificado nos trechos processados.",
+        },
+        "risco_churn": {
+            "score": min(100, 40 + 15 * len(churn_signals)) if churn_signals else 0,
+            "justificativa": "; ".join(churn_signals) or "Nenhum sinal explícito identificado.",
+        },
+        "oportunidade_comercial": opportunities,
+        "score_oportunidade": {
+            "score": min(100, 40 + 15 * len(opportunities)) if opportunities else 0,
+            "justificativa": "; ".join(opportunities) or "Nenhuma oportunidade explícita identificada.",
+        },
+        "budget": {
+            "identificado": bool(budget_facts),
+            "valor": "; ".join(_select_metric_facts(budget_facts, 3)),
+            "contexto": "; ".join(grouped["BUDGET"][:3]) or "Não identificado.",
+        },
+        "gap_produto": _select_critical_facts(grouped["GAP"], 3),
         "problemas_identificados": _select_critical_facts(grouped["PROBLEMA"], 3),
-        "decisoes_tomadas": _select_critical_facts(grouped["DECISÃO"], 3),
+        "feedback_produto": _select_critical_facts(grouped["FEEDBACK"], 3),
+        "evidencias": evidence,
+        "recomendacao_acao": _select_critical_facts(grouped["AÇÃO"], 3),
         "duvidas_em_aberto": _select_critical_facts(grouped["DÚVIDA"], 3),
-        "oportunidades_insights": _select_critical_facts(grouped["INSIGHT"], 3),
-        "evidencias_importantes": _select_critical_facts(grouped["EVIDÊNCIA"], 3),
-        "metricas_negocio": metrics,
-        "acoes_recomendadas": _select_critical_facts(grouped["AÇÃO"], 3),
     }
 
 
@@ -390,23 +420,7 @@ def iter_pending_summaries(chunks: list[MeetingChunk], concurrency: int):
 
 
 def build_single_chunk_final_summary(summary: dict) -> dict:
-    themes = summary.get("temas_discutidos", [])
-    compact_points = summary.get("pontos_chave", [])
-    return {
-        "resumo_geral": summary.get("resumo_chunk", ""),
-        "temas_agrupados": [
-            {"tema": theme, "pontos": [theme]} for theme in themes
-        ],
-        "problemas_identificados": summary.get("problemas_identificados", []),
-        "decisoes_tomadas": summary.get("decisoes_tomadas", []),
-        "duvidas_em_aberto": summary.get("duvidas_em_aberto", []),
-        "oportunidades_insights": summary.get("oportunidades_insights", []),
-        "evidencias_importantes": summary.get(
-            "evidencias_importantes", compact_points
-        ),
-        "metricas_negocio": summary.get("metricas_negocio", {}),
-        "acoes_recomendadas": summary.get("acoes_recomendadas", []),
-    }
+    return build_compact_final_summary([summary])
 
 
 def prepare_analysis(db: Session, payload: AnalyzeRequest) -> MeetingAnalysis:
@@ -486,12 +500,6 @@ def process_analysis_summaries(
 
         chunks = existing_chunks
         pending = [chunk for chunk in chunks if chunk.chunk_summary is None]
-        priority_indices = rank_chunk_indices_for_partial(
-            [chunk.clean_content or chunk.content for chunk in pending],
-            min(settings.max_llm_chunks, len(pending)),
-        )
-        priority = [pending[index] for index in priority_indices]
-        pending = priority
         chunks_by_index = {chunk.chunk_index: chunk for chunk in chunks}
         started_at = perf_counter()
         for chunk_index, summary in iter_pending_summaries(

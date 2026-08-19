@@ -136,3 +136,33 @@ def test_semantic_search_returns_ranked_evidence(monkeypatch):
     assert response.json()["ready"] is True
     assert response.json()["results"][0]["chunk_index"] == 7
     assert response.json()["results"][0]["similarity"] == 0.91
+
+
+def test_category_evidence_returns_grouped_semantic_context(monkeypatch):
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    app.dependency_overrides[get_db] = lambda: object()
+    monkeypatch.setattr(
+        main,
+        "search_analysis_categories",
+        lambda _db, current_id, top_k: {
+            "analysis_id": current_id,
+            "ready": True,
+            "categories": {
+                "budget": [{
+                    "chunk_id": UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                    "chunk_index": 3,
+                    "excerpt": "R$ 50 mil de investimento",
+                    "similarity": 0.94,
+                }],
+            },
+        },
+    )
+    try:
+        response = client.get(
+            f"/analises/{analysis_id}/evidencias", params={"top_k": 2}
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["categories"]["budget"][0]["chunk_index"] == 3

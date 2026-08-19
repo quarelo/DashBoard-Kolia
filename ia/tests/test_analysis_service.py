@@ -178,9 +178,10 @@ def test_preliminary_summary_keeps_worst_case_critical_facts():
     serialized = str(result).casefold()
 
     assert set(result) == {
-        "resumo_geral", "temas_agrupados", "problemas_identificados",
-        "decisoes_tomadas", "duvidas_em_aberto", "oportunidades_insights",
-        "evidencias_importantes", "metricas_negocio", "acoes_recomendadas",
+        "produto", "persona", "sentimento", "risco_churn",
+        "oportunidade_comercial", "score_oportunidade", "budget",
+        "gap_produto", "problemas_identificados", "feedback_produto",
+        "evidencias", "recomendacao_acao", "duvidas_em_aberto",
     }
     for expected in ("25 pessoas", "20 ou 40", "segunda-feira", "27 máquinas", "março ou abril"):
         assert expected in serialized
@@ -192,8 +193,8 @@ def test_preliminary_summary_parses_tokenizer_spaced_speaker_tags():
         "[ L73 ] : Vamos revisar cloud em março ou abril."
     )
 
-    assert "27 máquinas" in result["evidencias_importantes"][0]
-    assert all(len(item) < 100 for item in result["evidencias_importantes"])
+    assert "27 máquinas" in result["evidencias"][0]["trecho"]
+    assert all(len(item["trecho"]) < 100 for item in result["evidencias"])
 
 
 def test_preliminary_summary_splits_long_turn_before_critical_fact():
@@ -203,7 +204,7 @@ def test_preliminary_summary_splits_long_turn_before_critical_fact():
     )
 
     assert any(
-        "27 máquinas" in item for item in result["evidencias_importantes"]
+        "27 máquinas" in item["trecho"] for item in result["evidencias"]
     )
 
 
@@ -212,18 +213,18 @@ def test_compact_summary_bounds_malformed_long_model_fact():
         "pontos_chave": ["AÇÃO: " + ("texto muito longo " * 100)]
     }])
 
-    assert len(result["acoes_recomendadas"][0]) <= 321
-    assert result["acoes_recomendadas"][0].endswith("…")
+    assert len(result["recomendacao_acao"][0]) <= 321
+    assert result["recomendacao_acao"][0].endswith("…")
 
 
 def test_compact_summary_metrics_keep_late_transcript_facts():
-    facts = [f"VALOR: métrica {index}" for index in range(30)]
-    facts += ["VALOR: substituição de 27 máquinas"]
+    facts = [f"BUDGET: R$ {index} mil" for index in range(30)]
+    facts += ["BUDGET: R$ 500 mil para substituição de máquinas"]
     result = analysis_service.build_compact_final_summary([{
         "pontos_chave": facts
     }])
 
-    assert "27 máquinas" in result["metricas_negocio"]["valores"]
+    assert "R$ 500 mil" in result["budget"]["valor"]
 
 
 def test_model_summary_is_enriched_with_deterministic_evidence():
@@ -299,11 +300,14 @@ def test_analyze_meeting_persists_real_ollama_results(monkeypatch):
         for point in stored_chunk.chunk_summary["pontos_chave"]
     )
     assert stored_chunk.embedding == embedding
-    assert "reunião técnica sexta-feira" in result.final_summary["resumo_geral"]
-    assert "dificuldade na integração com ERP" in result.final_summary["resumo_geral"]
-    assert "Marcar reunião técnica sexta-feira" in result.final_summary["decisoes_tomadas"]
     assert "Dificuldade na integração com ERP" in result.final_summary["problemas_identificados"]
-    assert "Realizar reunião técnica" in result.final_summary["acoes_recomendadas"]
+    assert "Realizar reunião técnica" in result.final_summary["recomendacao_acao"]
+    assert set(result.final_summary) == {
+        "produto", "persona", "sentimento", "risco_churn",
+        "oportunidade_comercial", "score_oportunidade", "budget",
+        "gap_produto", "problemas_identificados", "feedback_produto",
+        "evidencias", "recomendacao_acao", "duvidas_em_aberto",
+    }
     assert result.total_tokens == 18
     assert result.status == "DONE"
 
@@ -437,43 +441,136 @@ def test_pending_summaries_rejects_concurrency_above_two():
         raise AssertionError("concorrência maior que dois deve ser rejeitada")
 
 
+def test_summary_worker_sends_every_chunk_to_ollama_even_with_legacy_limit(monkeypatch):
+    analysis_id = uuid4()
+    analysis = MeetingAnalysis(
+        id=analysis_id,
+        external_meeting_id=uuid4(),
+        title="Todos os chunks",
+        status="PROCESSING",
+        total_chunks=2,
+    )
+    chunks = [
+        MeetingChunk(
+            analysis_id=analysis_id,
+            external_meeting_id=analysis.external_meeting_id,
+            chunk_index=1,
+            token_count=1,
+            content="primeiro",
+            clean_content="primeiro",
+        ),
+        MeetingChunk(
+            analysis_id=analysis_id,
+            external_meeting_id=analysis.external_meeting_id,
+            chunk_index=2,
+            token_count=1,
+            content="segundo",
+            clean_content="segundo",
+        ),
+    ]
+    session = FakeSession()
+    session.add(analysis)
+    for chunk in chunks:
+        session.add(chunk)
+    calls = []
+
+    monkeypatch.setattr(settings, "max_llm_chunks", 1)
+    monkeypatch.setattr(
+        analysis_service,
+        "generate_chunk_summary",
+        lambda text: calls.append(text) or {"pontos_chave": ["EVIDÊNCIA: trecho"]},
+    )
+    monkeypatch.setattr(
+        analysis_service,
+        "complete_missing_fields",
+        lambda summary, _summaries: summary,
+    )
+
+    result = analysis_service.process_analysis_summaries(db=session, analysis_id=analysis_id)
+
+    assert result.status == "DASHBOARD_READY"
+    assert calls == ["primeiro", "segundo"]
+
+
 def test_single_compact_chunk_preserves_key_points_as_evidence():
     summary = {
         "pontos_chave": [
-            "DECISÃO: contrato será assinado",
-            "PRAZO: sexta-feira",
+            "PRODUTO: TOTVS ERP",
+            "DÚVIDA: qual é o prazo?",
         ]
     }
 
     result = analysis_service.build_single_chunk_final_summary(summary)
 
-    assert result["evidencias_importantes"] == summary["pontos_chave"]
+    assert [item["insight"] for item in result["evidencias"]] == [
+        "TOTVS ERP", "qual é o prazo?"
+    ]
 
 
 def test_compact_final_summary_routes_prefixed_facts_without_llm():
     summaries = [
         {"pontos_chave": [
-            "DECISÃO: aprovar contrato",
+            "PRODUTO: TOTVS ERP",
             "AÇÃO: enviar proposta",
-            "VALOR: R$ 500",
+            "BUDGET: R$ 500",
+            "OPORTUNIDADE: ampliar licenças do ERP",
         ]},
         {"pontos_chave": [
             "PROBLEMA: integração indisponível",
             "DÚVIDA: qual é o prazo?",
-            "PRAZO: sexta-feira",
+            "GAP: integração com sistema legado",
         ]},
     ]
 
     result = analysis_service.build_compact_final_summary(summaries)
 
-    assert result["decisoes_tomadas"] == ["aprovar contrato"]
-    assert result["acoes_recomendadas"] == ["enviar proposta"]
+    assert result["produto"] == ["TOTVS ERP"]
+    assert result["recomendacao_acao"] == ["enviar proposta"]
     assert result["problemas_identificados"] == ["integração indisponível"]
     assert result["duvidas_em_aberto"] == ["qual é o prazo?"]
-    assert result["metricas_negocio"] == {
-        "valores": "R$ 500",
-        "prazos": "sexta-feira",
+    assert result["budget"]["valor"] == "R$ 500"
+    assert result["oportunidade_comercial"] == ["ampliar licenças do ERP"]
+    assert result["gap_produto"] == ["integração com sistema legado"]
+
+
+def test_compact_summary_keeps_evidence_for_late_commercial_categories():
+    points = [
+        "PRODUTO: TOTVS ERP", "PRODUTO: TOTVS CRM",
+        "PERSONA: Gerente de TI", "PERSONA: Executivo de vendas",
+        "SENTIMENTO: cliente insatisfeito", "CHURN: ameaçou cancelar",
+        "OPORTUNIDADE: CRM para 25 vendedores", "BUDGET: R$ 50 mil",
+        "GAP: integração WhatsApp", "PROBLEMA: lentidão",
+        "PROBLEMA: falha de integração", "EVIDÊNCIA: relato literal",
+        "FEEDBACK: produto lento", "DÚVIDA: qual o prazo?",
+        "AÇÃO: enviar proposta",
+    ]
+
+    result = analysis_service.build_compact_final_summary([
+        {"pontos_chave": points}
+    ])
+    evidence_categories = {
+        item["categoria"] for item in result["evidencias"]
     }
+
+    assert {"feedback", "dúvida", "ação"} <= evidence_categories
+
+
+def test_compact_summary_does_not_turn_neutral_insights_into_churn_or_budget():
+    result = analysis_service.build_compact_final_summary([{
+        "pontos_chave": [
+            "CHURN: Avaliar o desempenho do vendedor",
+            "CHURN: Perder oportunidades",
+            "CHURN: Cliente ameaçou cancelar o contrato",
+            "BUDGET: mil atividades atrasadas",
+            "BUDGET: R$ 50 mil de investimento",
+        ]
+    }])
+
+    assert result["risco_churn"]["score"] == 55
+    assert result["risco_churn"]["justificativa"] == (
+        "Cliente ameaçou cancelar o contrato"
+    )
+    assert result["budget"]["valor"] == "R$ 50 mil de investimento"
 
 
 def test_compact_final_summary_preserves_unprefixed_model_facts():
@@ -481,10 +578,7 @@ def test_compact_final_summary_preserves_unprefixed_model_facts():
 
     result = analysis_service.build_compact_final_summary(summaries)
 
-    assert result["resumo_geral"] == "CRM automatiza a força de vendas."
-    assert result["evidencias_importantes"] == [
-        "CRM automatiza a força de vendas."
-    ]
+    assert result["evidencias"][0]["trecho"] == "CRM automatiza a força de vendas."
 
 
 def test_compact_final_summary_prioritizes_late_quantified_facts():
@@ -496,35 +590,31 @@ def test_compact_final_summary_prioritizes_late_quantified_facts():
         ]},
         {"pontos_chave": [
             "AÇÃO: montar o plano na segunda-feira",
-            "VALOR: 40 licenças para força de vendas",
-            "VALOR: 25 licenças para CRM",
+            "OPORTUNIDADE: 40 licenças para força de vendas",
+            "OPORTUNIDADE: 25 licenças para CRM",
         ]},
     ]
 
     result = analysis_service.build_compact_final_summary(summaries)
 
-    assert "montar o plano na segunda-feira" in result["acoes_recomendadas"]
-    assert result["metricas_negocio"]["valores"] == (
-        "40 licenças para força de vendas; 25 licenças para CRM"
-    )
+    assert "montar o plano na segunda-feira" in result["recomendacao_acao"]
+    assert result["oportunidade_comercial"] == [
+        "40 licenças para força de vendas", "25 licenças para CRM"
+    ]
 
 
 def test_compact_final_summary_discards_vague_values_and_deadlines():
     summaries = [{"pontos_chave": [
-        "VALOR: investimento em estudo",
-        "VALOR: R$ 500 mil em pedidos",
-        "PRAZO: verificar opções",
-        "PRAZO: revisar o PD4000",
-        "PRAZO: concluir em X semanas",
-        "PRAZO: configurar rotas semanais",
-        "PRAZO: entregar na segunda-feira",
+        "BUDGET: investimento em estudo",
+        "BUDGET: R$ 500 mil em pedidos",
     ]}]
 
     result = analysis_service.build_compact_final_summary(summaries)
 
-    assert result["metricas_negocio"] == {
-        "valores": "R$ 500 mil em pedidos",
-        "prazos": "entregar na segunda-feira",
+    assert result["budget"] == {
+        "identificado": True,
+        "valor": "R$ 500 mil em pedidos",
+        "contexto": "investimento em estudo; R$ 500 mil em pedidos",
     }
 
 

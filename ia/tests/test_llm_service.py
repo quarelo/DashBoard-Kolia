@@ -37,7 +37,8 @@ def test_generate_chunk_summary_uses_configured_model_and_decodes_json(monkeypat
         assert set(payload["format"]["properties"]) == {"pontos_chave"}
         assert payload["format"]["properties"]["pontos_chave"]["minItems"] == 1
         assert payload["format"]["properties"]["pontos_chave"]["items"]["pattern"] == (
-            "^(DECISÃO|AÇÃO|PRAZO|VALOR|PROBLEMA|DÚVIDA|EVIDÊNCIA|INSIGHT): .+$"
+            "^(PRODUTO|PERSONA|SENTIMENTO|CHURN|OPORTUNIDADE|BUDGET|"
+            "GAP|PROBLEMA|FEEDBACK|DÚVIDA|AÇÃO|EVIDÊNCIA): .+$"
         )
         assert payload["stream"] is False
         assert payload["think"] is True
@@ -63,18 +64,18 @@ def test_consolidate_summaries_uses_its_own_thinking_budget(monkeypatch):
         assert "Integração" in payload["prompt"]
         assert payload["think"] is True
         assert payload["options"]["num_predict"] == 1024
-        assert payload["format"]["properties"]["decisoes_tomadas"]["maxItems"] == 3
-        assert payload["format"]["properties"]["temas_agrupados"]["maxItems"] == 3
+        assert payload["format"]["properties"]["oportunidade_comercial"]["maxItems"] == 3
+        assert payload["format"]["properties"]["evidencias"]["maxItems"] == 24
         return httpx.Response(
             200,
-            json={"response": json.dumps({"resumo_geral": "Resumo real"})},
+            json={"response": json.dumps({"produto": ["TOTVS ERP"]})},
         )
 
     result = consolidate_summaries(
         [{"temas_discutidos": ["Integração"]}], client=client_for(handler)
     )
 
-    assert result == {"resumo_geral": "Resumo real"}
+    assert result == {"produto": ["TOTVS ERP"]}
 
 
 def test_generate_embedding_uses_configured_model(monkeypatch):
@@ -188,14 +189,16 @@ def test_generation_retries_truncated_output_with_larger_budget(monkeypatch):
     assert calls == [192, 384]
 
 
-def test_chunk_summary_normalizes_categories_and_caps_model_overflow():
+def test_chunk_summary_normalizes_and_preserves_commercial_categories():
     response = {
         "pontos_chave": [
             "AÇÃO: enviar proposta",
             "DÚVIDAS: qual é o prazo?",
-            "VALOR: 40 licenças",
-            "PRAZO: segunda-feira",
-            "INSIGHT: item excedente",
+            "BUDGET: R$ 40 mil",
+            "PRODUTO: TOTVS CRM",
+            "OPORTUNIDADE: ampliar licenças",
+            "GAP: integração ausente",
+            "FEEDBACK: item excedente",
         ]
     }
     client = client_for(
@@ -210,10 +213,13 @@ def test_chunk_summary_normalizes_categories_and_caps_model_overflow():
         "pontos_chave": [
             "AÇÃO: enviar proposta",
             "DÚVIDA: qual é o prazo?",
-            "VALOR: 40 licenças",
-            "PRAZO: segunda-feira",
-        ]
-    }
+            "BUDGET: R$ 40 mil",
+            "PRODUTO: TOTVS CRM",
+                "OPORTUNIDADE: ampliar licenças",
+                "GAP: integração ausente",
+                "FEEDBACK: item excedente",
+            ]
+        }
 
 
 def test_chunk_summary_salvages_only_complete_items_from_truncated_json(
@@ -222,7 +228,7 @@ def test_chunk_summary_salvages_only_complete_items_from_truncated_json(
     monkeypatch.setattr(settings, "ollama_json_repair_enabled", False)
     raw = (
         '{"pontos_chave":["AÇÃO: enviar proposta",'
-        '"VALOR: 40 licenças","PRAZO: segunda-feira",'
+        '"BUDGET: R$ 40 mil","PRODUTO: TOTVS CRM",'
         '"PROBLEMA: integração ausente","DÚVIDA: item cortado'
     )
     client = client_for(
@@ -237,8 +243,8 @@ def test_chunk_summary_salvages_only_complete_items_from_truncated_json(
     assert result == {
         "pontos_chave": [
             "AÇÃO: enviar proposta",
-            "VALOR: 40 licenças",
-            "PRAZO: segunda-feira",
+                "BUDGET: R$ 40 mil",
+                "PRODUTO: TOTVS CRM",
             "PROBLEMA: integração ausente",
         ]
     }
@@ -265,42 +271,77 @@ def test_chunk_summary_preserves_explicit_quantity_and_dated_commitment():
 
     result = generate_chunk_summary(text, client=client)
 
-    assert "VALOR: CRM para 25 pessoas" in result["pontos_chave"]
+    assert "OPORTUNIDADE: CRM para 25 pessoas" in result["pontos_chave"]
     assert (
-        "PRAZO: montar esses planos de viagem na segunda-feira"
+        "AÇÃO: montar esses planos de viagem na segunda-feira"
         in result["pontos_chave"]
     )
+
+
+def test_chunk_summary_recovers_explicit_commercial_signals_omitted_by_model():
+    client = client_for(
+        lambda _request: httpx.Response(
+            200,
+            json={"response": json.dumps({
+                "pontos_chave": ["EVIDÊNCIA: conversa comercial"]
+            })},
+        )
+    )
+    text = (
+        "[CLIENTE - Gerente de TI]: Usamos o TOTVS ERP, mas estamos "
+        "insatisfeitos com a lentidão e podemos cancelar se o problema não "
+        "for resolvido. Precisamos integrar WhatsApp, recurso que não "
+        "encontramos hoje. Temos budget de R$ 50 mil e interesse em comprar "
+        "TOTVS CRM para 25 vendedores. Qual é o prazo de implantação?"
+    )
+
+    result = generate_chunk_summary(text, client=client)
+    serialized = "\n".join(result["pontos_chave"])
+
+    for expected in (
+        "PRODUTO: TOTVS ERP",
+        "PERSONA: Gerente de TI",
+        "SENTIMENTO: insatisfeitos com a lentidão",
+        "CHURN: podemos cancelar se o problema não for resolvido",
+        "GAP: integrar WhatsApp, recurso que não encontramos hoje",
+        "FEEDBACK: insatisfeitos com a lentidão",
+        "BUDGET: R$ 50 mil",
+        "DÚVIDA: Qual é o prazo de implantação?",
+        "OPORTUNIDADE: CRM para 25 vendedores",
+    ):
+        assert expected in serialized
 
 
 def test_complete_missing_fields_requests_only_absent_fields(monkeypatch):
     monkeypatch.setattr(settings, "consolidation_model", "modelo-final")
     partial = {
-        "resumo_geral": "Resumo preservado",
-        "decisoes_tomadas": [],
-        "acoes_recomendadas": None,
+        "produto": ["TOTVS ERP"],
+        "persona": ["Gerente de TI"],
+        "recomendacao_acao": None,
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         assert set(payload["format"]["properties"]) == {
-            "temas_agrupados",
-            "problemas_identificados",
-            "duvidas_em_aberto",
-            "oportunidades_insights",
-            "evidencias_importantes",
-            "metricas_negocio",
-            "acoes_recomendadas",
+            "sentimento", "risco_churn", "oportunidade_comercial",
+            "score_oportunidade", "budget", "gap_produto",
+            "problemas_identificados", "feedback_produto", "evidencias",
+            "recomendacao_acao", "duvidas_em_aberto",
         }
         return httpx.Response(
             200,
             json={"response": json.dumps({
-                "temas_agrupados": [],
+                "sentimento": {"classificacao": "neutro", "justificativa": "Sem sinal forte"},
+                "risco_churn": {"score": 0, "justificativa": "Sem sinal"},
+                "oportunidade_comercial": [],
+                "score_oportunidade": {"score": 0, "justificativa": "Sem sinal"},
+                "budget": {"identificado": False, "valor": "", "contexto": "Não identificado"},
+                "gap_produto": [],
                 "problemas_identificados": [],
                 "duvidas_em_aberto": [],
-                "oportunidades_insights": [],
-                "evidencias_importantes": ["Contrato"],
-                "metricas_negocio": {},
-                "acoes_recomendadas": ["Enviar proposta"],
+                "feedback_produto": [],
+                "evidencias": [],
+                "recomendacao_acao": ["Enviar proposta"],
             })},
         )
 
@@ -310,9 +351,9 @@ def test_complete_missing_fields_requests_only_absent_fields(monkeypatch):
         client=client_for(handler),
     )
 
-    assert result["resumo_geral"] == "Resumo preservado"
-    assert result["decisoes_tomadas"] == []
-    assert result["acoes_recomendadas"] == ["Enviar proposta"]
+    assert result["produto"] == ["TOTVS ERP"]
+    assert result["persona"] == ["Gerente de TI"]
+    assert result["recomendacao_acao"] == ["Enviar proposta"]
 
 
 def test_generation_retries_one_read_timeout(monkeypatch):

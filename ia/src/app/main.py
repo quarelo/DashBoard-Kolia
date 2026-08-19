@@ -11,10 +11,15 @@ from src.app.models.analysis import MeetingAnalysis, MeetingChunk
 from src.app.schemas.analysis import (
     AnalysisDetailResponse, AnalyzeRequest, AnalyzeResponse, ChunkResponse,
     SemanticSearchRequest, SemanticSearchResponse,
+    CategoryEvidenceResponse,
 )
 from src.app.services.analysis_service import build_analysis_progress, prepare_analysis
 from src.app.services.analysis_worker import AnalysisWorker
-from src.app.services.rag_service import RagNotReadyError, search_analysis_chunks
+from src.app.services.rag_service import (
+    RagNotReadyError,
+    search_analysis_categories,
+    search_analysis_chunks,
+)
 
 analysis_worker = AnalysisWorker(
     SessionLocal,
@@ -106,6 +111,23 @@ def semantic_search(
         return search_analysis_chunks(
             db, analysis_id, payload.query, payload.top_k
         )
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except RagNotReadyError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get(
+    "/analises/{analysis_id}/evidencias",
+    response_model=CategoryEvidenceResponse,
+)
+def category_evidence(
+    analysis_id: UUID,
+    top_k: int = 4,
+    db: Session = Depends(get_db),
+):
+    try:
+        return search_analysis_categories(db, analysis_id, top_k)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except RagNotReadyError as error:

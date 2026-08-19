@@ -22,6 +22,15 @@ def split_text_by_tokens(text: str, max_tokens: int, overlap_tokens: int) -> lis
     chunks, start = [], 0
     while start < len(tokens):
         end = min(start + max_tokens, len(tokens))
+        if end < len(tokens):
+            minimum_boundary = start + max(1, (max_tokens + 1) // 2)
+            sentence_boundaries = [
+                index + 1
+                for index in range(minimum_boundary - 1, end)
+                if tokens[index] in {".", "!", "?", ";"}
+            ]
+            if sentence_boundaries:
+                end = sentence_boundaries[-1]
         chunks.append(" ".join(tokens[start:end]).strip())
         if end >= len(tokens):
             break

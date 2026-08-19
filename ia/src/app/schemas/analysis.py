@@ -77,3 +77,9 @@ class SemanticSearchResponse(BaseModel):
     query: str
     ready: bool
     results: list[SemanticSearchResult]
+
+
+class CategoryEvidenceResponse(BaseModel):
+    analysis_id: UUID
+    ready: bool
+    categories: dict[str, list[SemanticSearchResult]]

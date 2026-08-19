@@ -84,4 +84,32 @@ python ia/scripts/endpoint_benchmark.py \
   --input ia/tests/test_analisar.py \
   --output ia/logs/endpoint-giant-hybrid15.json \
   --timeout 1800
+
+
+
 ```
+1. Produto — Identifica qual produto TOTVS está sendo mencionado.
+
+2. Persona — Identifica o perfil profissional envolvido na conversa.
+
+3. Sentimento — Avalia a percepção geral do cliente sobre a reunião.
+
+4. Risco de Churn — Detecta sinais de possível cancelamento ou insatisfação.
+
+5. Oportunidade Comercial — Identifica possibilidades de venda ou expansão de algo já existente no portfolio 
+
+6. Score de Oportunidade — Prioriza oportunidades conforme potencial comercial identificado.
+
+7. Budget — Estima valores financeiros mencionados na negociação.
+
+8. Gap de Produto — Detecta necessidades não atendidas pelo portfólio atual.
+
+9. Problemas Identificados — Resume dores, dificuldades e obstáculos relatados.
+
+10. Feedback do Produto — Avalia opiniões sobre produtos já utilizados.
+
+11. Evidências — Mostra trechos que sustentam cada insight gerado.
+
+12. Recomendação de Ação — Sugere próximos passos baseados nos insights encontrados.
+
+13. Dúvidas em aberto - Encontra dúvidas que não foram esclarecidas para o cliente
