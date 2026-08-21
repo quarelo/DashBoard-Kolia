@@ -1,13 +1,14 @@
 from fastapi import FastAPI, HTTPException, status, Depends
 from sqlalchemy.orm import Session
+from core.config import settings
 from core.security import get_password_hash, verify_password, create_access_token
-from core.database import engine, Base, get_db
+from core.database import get_db, init_database
 from models.user import UserModel
 from schemas.user import UserCreate, UserLogin, Token
 
 app = FastAPI()
 
-Base.metadata.create_all(bind=engine)
+init_database()
 
 @app.post("/register", status_code=status.HTTP_201_CREATED)
 def register_user(user: UserCreate, db: Session = Depends(get_db)):
@@ -43,5 +44,5 @@ def login(user: UserLogin, db: Session = Depends(get_db)):
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "expires_in_days": 7
+        "expires_in_days": settings.access_token_expire_days
     }

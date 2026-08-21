@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from enum import Enum
 
 class RoleEnum(str, Enum):
@@ -9,11 +9,11 @@ class UserCreate(BaseModel):
     name: str
     email: EmailStr
     role: RoleEnum
-    password: str
+    password: str = Field(min_length=8, max_length=72)
 
 class UserLogin(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1, max_length=72)
 
 class Token(BaseModel):
     access_token: str
