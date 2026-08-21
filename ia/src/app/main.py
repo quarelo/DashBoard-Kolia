@@ -5,15 +5,36 @@ from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.app.core.database import get_db, init_database
+from src.app.core.config import settings
+from src.app.core.database import SessionLocal, get_db, init_database
 from src.app.models.analysis import MeetingAnalysis, MeetingChunk
-from src.app.schemas.analysis import AnalysisDetailResponse, AnalyzeRequest, AnalyzeResponse, ChunkResponse
-from src.app.services.analysis_service import analyze_meeting
+from src.app.schemas.analysis import (
+    AnalysisDetailResponse, AnalyzeRequest, AnalyzeResponse, ChunkResponse,
+    SemanticSearchRequest, SemanticSearchResponse,
+    CategoryEvidenceResponse,
+)
+from src.app.services.analysis_service import build_analysis_progress, prepare_analysis
+from src.app.services.analysis_worker import AnalysisWorker
+from src.app.services.rag_service import (
+    RagNotReadyError,
+    search_analysis_categories,
+    search_analysis_chunks,
+)
+
+analysis_worker = AnalysisWorker(
+    SessionLocal,
+    concurrency=settings.analysis_worker_concurrency,
+)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_database()
-    yield
+    analysis_worker.start()
+    analysis_worker.recover()
+    try:
+        yield
+    finally:
+        analysis_worker.stop()
 
 
 app = FastAPI(title="KOLIA IA Service", version="0.1.0", lifespan=lifespan)
@@ -29,14 +50,26 @@ def health():
     return {"status": "ok", "service": "kolia-ia-service"}
 
 
-@app.post("/analisar", response_model=AnalyzeResponse)
+@app.post("/analisar", response_model=AnalyzeResponse, status_code=202)
 def analisar(payload: AnalyzeRequest, db: Session = Depends(get_db)):
-    analysis = analyze_meeting(db, payload)
-    return AnalyzeResponse(analysis_id=analysis.id, meeting_id=analysis.external_meeting_id, status=analysis.status, total_tokens=analysis.total_tokens, total_chunks=analysis.total_chunks, final_summary=analysis.final_summary, error_message=analysis.error_message)
+    analysis = prepare_analysis(db, payload)
+    analysis_worker.submit(analysis.id)
+    progress = build_analysis_progress(analysis, [])
+    return AnalyzeResponse(analysis_id=analysis.id, meeting_id=analysis.external_meeting_id, status=analysis.status, total_tokens=analysis.total_tokens, final_summary=analysis.final_summary, error_message=analysis.error_message, **progress)
 
 
-def _detail(analysis: MeetingAnalysis) -> AnalysisDetailResponse:
-    return AnalysisDetailResponse(analysis_id=analysis.id, meeting_id=analysis.external_meeting_id, user_id=analysis.external_user_id, title=analysis.title, status=analysis.status, total_tokens=analysis.total_tokens, total_chunks=analysis.total_chunks, final_summary=analysis.final_summary, error_message=analysis.error_message)
+def _detail(
+    analysis: MeetingAnalysis, chunks: list[MeetingChunk]
+) -> AnalysisDetailResponse:
+    progress = build_analysis_progress(analysis, chunks)
+    return AnalysisDetailResponse(analysis_id=analysis.id, meeting_id=analysis.external_meeting_id, user_id=analysis.external_user_id, title=analysis.title, status=analysis.status, total_tokens=analysis.total_tokens, final_summary=analysis.final_summary, error_message=analysis.error_message, **progress)
+
+
+def _chunks_for_analysis(db: Session, analysis_id: UUID) -> list[MeetingChunk]:
+    statement = select(MeetingChunk).where(
+        MeetingChunk.analysis_id == analysis_id
+    ).order_by(MeetingChunk.chunk_index.asc())
+    return list(db.execute(statement).scalars().all())
 
 
 @app.get("/analises/{analysis_id}", response_model=AnalysisDetailResponse)
@@ -44,7 +77,7 @@ def get_analysis(analysis_id: UUID, db: Session = Depends(get_db)):
     analysis = db.get(MeetingAnalysis, analysis_id)
     if not analysis:
         raise HTTPException(status_code=404, detail="Análise não encontrada.")
-    return _detail(analysis)
+    return _detail(analysis, _chunks_for_analysis(db, analysis.id))
 
 
 @app.get("/analises/by-meeting/{meeting_id}", response_model=AnalysisDetailResponse)
@@ -53,7 +86,7 @@ def get_analysis_by_meeting(meeting_id: UUID, db: Session = Depends(get_db)):
     analysis = db.execute(statement).scalar_one_or_none()
     if not analysis:
         raise HTTPException(status_code=404, detail="Análise não encontrada para esta reunião.")
-    return _detail(analysis)
+    return _detail(analysis, _chunks_for_analysis(db, analysis.id))
 
 
 @app.get("/analises/{analysis_id}/chunks", response_model=list[ChunkResponse])
@@ -63,3 +96,39 @@ def list_chunks(analysis_id: UUID, db: Session = Depends(get_db)):
     statement = select(MeetingChunk).where(MeetingChunk.analysis_id == analysis_id).order_by(MeetingChunk.chunk_index.asc())
     chunks = db.execute(statement).scalars().all()
     return [ChunkResponse(id=chunk.id, chunk_index=chunk.chunk_index, token_count=chunk.token_count, content=chunk.content, clean_content=chunk.clean_content, chunk_summary=chunk.chunk_summary) for chunk in chunks]
+
+
+@app.post(
+    "/analises/{analysis_id}/buscar",
+    response_model=SemanticSearchResponse,
+)
+def semantic_search(
+    analysis_id: UUID,
+    payload: SemanticSearchRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return search_analysis_chunks(
+            db, analysis_id, payload.query, payload.top_k
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except RagNotReadyError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get(
+    "/analises/{analysis_id}/evidencias",
+    response_model=CategoryEvidenceResponse,
+)
+def category_evidence(
+    analysis_id: UUID,
+    top_k: int = 4,
+    db: Session = Depends(get_db),
+):
+    try:
+        return search_analysis_categories(db, analysis_id, top_k)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except RagNotReadyError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error

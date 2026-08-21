@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -25,6 +25,18 @@ class MeetingAnalysis(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    summary_attempt_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    summary_attempt_started_chunks: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    summary_stage: Mapped[str] = mapped_column(
+        Text, default="PRELIMINARY", server_default="PRELIMINARY"
+    )
+    summary_is_final: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
     chunks: Mapped[list["MeetingChunk"]] = relationship(back_populates="analysis", cascade="all, delete-orphan")
 
 

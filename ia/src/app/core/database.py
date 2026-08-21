@@ -25,3 +25,20 @@ def init_database() -> None:
         connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     import src.app.models  # noqa: F401
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE ai.meeting_analyses ADD COLUMN IF NOT EXISTS "
+            "summary_attempt_started_at TIMESTAMP WITH TIME ZONE"
+        ))
+        connection.execute(text(
+            "ALTER TABLE ai.meeting_analyses ADD COLUMN IF NOT EXISTS "
+            "summary_attempt_started_chunks INTEGER NOT NULL DEFAULT 0"
+        ))
+        connection.execute(text(
+            "ALTER TABLE ai.meeting_analyses ADD COLUMN IF NOT EXISTS "
+            "summary_stage TEXT NOT NULL DEFAULT 'PRELIMINARY'"
+        ))
+        connection.execute(text(
+            "ALTER TABLE ai.meeting_analyses ADD COLUMN IF NOT EXISTS "
+            "summary_is_final BOOLEAN NOT NULL DEFAULT false"
+        ))
