@@ -32,6 +32,8 @@ def test_generate_chunk_summary_uses_configured_model_and_decodes_json(monkeypat
         assert payload["keep_alive"] == "30m"
         assert "não crie novas ações" in payload["prompt"].lower()
         assert "extraia pelo menos um" in payload["prompt"].lower()
+        assert "métricas de exemplo" in payload["prompt"].lower()
+        assert "não use a palavra" in payload["prompt"].lower()
         assert payload["format"]["type"] == "object"
         assert payload["format"]["additionalProperties"] is False
         assert set(payload["format"]["properties"]) == {"pontos_chave"}
@@ -66,6 +68,8 @@ def test_consolidate_summaries_uses_its_own_thinking_budget(monkeypatch):
         assert payload["options"]["num_predict"] == 1024
         assert payload["format"]["properties"]["oportunidade_comercial"]["maxItems"] == 3
         assert payload["format"]["properties"]["evidencias"]["maxItems"] == 24
+        assert "pedido cancelado" in payload["prompt"].lower()
+        assert "troca de computador" in payload["prompt"].lower()
         return httpx.Response(
             200,
             json={"response": json.dumps({"produto": ["TOTVS ERP"]})},
