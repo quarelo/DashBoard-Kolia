@@ -573,6 +573,28 @@ def test_compact_summary_does_not_turn_neutral_insights_into_churn_or_budget():
     assert result["budget"]["valor"] == "R$ 50 mil de investimento"
 
 
+def test_compact_summary_anchors_critical_fields_in_transcription():
+    result = analysis_service.build_compact_final_summary(
+        [{"pontos_chave": [
+            "CHURN: Pedido cancelado no dashboard",
+            "BUDGET: duas mil atividades atrasadas",
+        ]}],
+        [
+            "O especialista de vendas apresentou o TotoCRM para o gestor comercial "
+            "e o time de marketing. O cliente gostou, mas considerou o cloud caro. "
+            "Precisamos importar ordem de compra por PDF e os usuários ficam presos no banco. "
+            "Não houve ameaça de cancelamento do contrato."
+        ],
+    )
+
+    assert result["produto"] == ["TotoCRM / CRM de automação de força de vendas"]
+    assert "gestor" in result["persona"]
+    assert result["sentimento"]["classificacao"] == "misto"
+    assert result["risco_churn"]["score"] == 0
+    assert result["budget"]["identificado"] is False
+    assert any("PDF" in item for item in result["gap_produto"])
+
+
 def test_compact_final_summary_preserves_unprefixed_model_facts():
     summaries = [{"pontos_chave": ["CRM automatiza a força de vendas."]}]
 
