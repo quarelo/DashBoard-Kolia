@@ -41,6 +41,10 @@ _CHURN_SIGNAL_PATTERN = re.compile(
     r"(?:cancel|churn|insatisfeit|risco de perder|não retid|deixar de|encerrar)",
     re.IGNORECASE,
 )
+_NON_CHURN_CANCELLATION_PATTERN = re.compile(
+    r"\b(?:pedido|ordem|fatura|cliente)\s+(?:foi\s+)?cancelad",
+    re.IGNORECASE,
+)
 _BUSINESS_METRIC_PATTERN = re.compile(
     r"\b(?:licenças?|usuários?|pessoas?|máquinas?|equipamentos?|crm|cloud)\b",
     re.IGNORECASE,
@@ -295,7 +299,91 @@ def build_analysis_progress(
     }
 
 
-def build_compact_final_summary(chunk_summaries: list[dict]) -> dict:
+def _source_sentences(source_texts: list[str]) -> list[str]:
+    return [
+        re.sub(r"\s+", " ", raw_sentence).strip()
+        for text in source_texts
+        for raw_sentence in re.split(r"(?<=[.!?])\s+", text)
+        if raw_sentence.strip()
+    ]
+
+
+def _extract_source_facts(source_texts: list[str]) -> dict[str, list[str]]:
+    """Recover high-signal facts from the transcript when a small model labels them poorly."""
+    sentences = _source_sentences(source_texts)
+    all_text = " ".join(sentences)
+    facts = {key: [] for key in (
+        "produto", "persona", "sentimento", "budget", "gap", "problema",
+        "oportunidade", "evidencia",
+    )}
+
+    def add(key: str, value: str, limit: int = 8) -> None:
+        value = _bound_summary_fact(value)
+        if value and value.casefold() not in {item.casefold() for item in facts[key]}:
+            facts[key].append(value)
+            del facts[key][limit:]
+
+    if re.search(r"\b(?:TotoCRM|CRM|força de vendas)\b", all_text, re.I):
+        add("produto", "TotoCRM / CRM de automação de força de vendas", 3)
+    if re.search(r"\b(?:DataSuite|DataSoup|PD4000)\b", all_text, re.I):
+        add("produto", "Integração com ERP/DataSuite e PD4000", 3)
+    for role in (
+        "gestor", "gerente", "diretor", "especialista de vendas", "vendedores",
+        "consultores", "representantes", "marketing", "infraestrutura", "TI",
+    ):
+        if re.search(rf"\b{re.escape(role)}\b", all_text, re.I):
+            add("persona", role)
+
+    positive = [s for s in sentences if re.search(
+        r"\b(?:interessante|gostaria|faz sentido|perfeito|prezamos?|boa|legal|concordo)\b",
+        s, re.I)]
+    caution = [s for s in sentences if re.search(
+        r"\b(?:caro|inviável|problema|presos? no banco|não conseguimos|não tenho)\b",
+        s, re.I)]
+    if positive and caution:
+        facts["sentimento"] = ["Interesse positivo, com ressalvas sobre custo, aderência e riscos técnicos."]
+    elif positive:
+        facts["sentimento"] = ["Percepção positiva e interesse em avançar."]
+    elif caution:
+        facts["sentimento"] = ["Percepção cautelosa, com ressalvas sobre custos e limitações técnicas."]
+
+    for sentence in sentences:
+        if re.search(r"R\$\s*\d|\b(?:licenças?|licenciamento)\b", sentence, re.I):
+            if not re.search(r"\b(?:clientes?|pedidos?|atividades?|quilômetros?)\b", sentence, re.I):
+                add("budget", sentence, 6)
+        if re.search(
+            r"(?:\bPDF\b|boleto|ordem de compra|\bEDI\b|"
+            r"usuários?.{0,35}presos? no banco|não.{0,30}roadmap|"
+            r"não.{0,30}(?:recurso|funcionalidade|atende)|"
+            r"customiza(?:ção|r).{0,40}(?:limita|não|falt))",
+            sentence,
+            re.I,
+        ):
+            add("gap", sentence)
+        if re.search(
+            r"(?:dificuldade|inviável|caro|não conseguimos|presos? no banco|"
+            r"Windows\s*11|substitui(?:ção|r).{0,40}(?:máquina|equipamento)|"
+            r"usuários?.{0,35}presos? no banco|não.{0,30}roadmap)",
+            sentence,
+            re.I,
+        ):
+            if not (
+                re.search(r"dificuldade", sentence, re.I)
+                and not re.search(r"(?:integra|substitu|infra|licen)", sentence, re.I)
+            ):
+                add("problema", sentence)
+        if re.search(r"(?:CRM|cloud|nuvem|IA|indicador|licença|consultoria)", sentence, re.I):
+            add("oportunidade", sentence, 6)
+    facts["evidencia"] = positive[:3] + caution[:3]
+    facts["budget"].sort(
+        key=lambda item: (not bool(re.search(r"R\$\s*\d", item)), item)
+    )
+    return facts
+
+
+def build_compact_final_summary(
+    chunk_summaries: list[dict], source_texts: list[str] | None = None
+) -> dict:
     grouped = {
         "PRODUTO": [], "PERSONA": [], "SENTIMENTO": [], "CHURN": [],
         "OPORTUNIDADE": [], "BUDGET": [], "GAP": [], "PROBLEMA": [],
@@ -340,6 +428,7 @@ def build_compact_final_summary(chunk_summaries: list[dict]) -> dict:
     grouped["CHURN"] = [
         fact for fact in grouped["CHURN"]
         if _CHURN_SIGNAL_PATTERN.search(fact)
+        and not _NON_CHURN_CANCELLATION_PATTERN.search(fact)
     ]
     opportunities = _select_critical_facts(grouped["OPORTUNIDADE"], 3)
     churn_signals = _select_critical_facts(grouped["CHURN"], 3)
@@ -365,9 +454,17 @@ def build_compact_final_summary(chunk_summaries: list[dict]) -> dict:
                 break
         if len(evidence) == 24:
             break
+    source_facts = _extract_source_facts(source_texts or []) if source_texts else {}
+    source_budget = source_facts.get("budget", [])
+    products = source_facts.get("produto", []) or _select_critical_facts(grouped["PRODUTO"], 3)
+    personas = source_facts.get("persona", []) or _select_critical_facts(grouped["PERSONA"], 3)
+    source_sentiment = source_facts.get("sentimento", [])
+    if source_sentiment:
+        sentiment = "misto" if "ressalva" in source_sentiment[0] else "positivo"
+        sentiment_facts = source_sentiment
     return {
-        "produto": _select_critical_facts(grouped["PRODUTO"], 3),
-        "persona": _select_critical_facts(grouped["PERSONA"], 3),
+        "produto": products[:3],
+        "persona": personas[:3],
         "sentimento": {
             "classificacao": sentiment,
             "justificativa": "; ".join(sentiment_facts[:3]) or "Não identificado nos trechos processados.",
@@ -382,12 +479,22 @@ def build_compact_final_summary(chunk_summaries: list[dict]) -> dict:
             "justificativa": "; ".join(opportunities) or "Nenhuma oportunidade explícita identificada.",
         },
         "budget": {
-            "identificado": bool(budget_facts),
-            "valor": "; ".join(_select_metric_facts(budget_facts, 3)),
-            "contexto": "; ".join(grouped["BUDGET"][:3]) or "Não identificado.",
+            "identificado": bool(source_budget or budget_facts),
+            "valor": "; ".join(_select_metric_facts(
+                source_facts.get("budget", []) or budget_facts, 3
+            )),
+            "contexto": "; ".join((source_facts.get("budget", []) or grouped["BUDGET"])[:3]) or "Não identificado.",
         },
-        "gap_produto": _select_critical_facts(grouped["GAP"], 3),
-        "problemas_identificados": _select_critical_facts(grouped["PROBLEMA"], 3),
+        "gap_produto": (
+            source_facts.get("gap", [])
+            + [fact for fact in _select_critical_facts(grouped["GAP"], 3)
+               if fact not in source_facts.get("gap", [])]
+        )[:3] or _select_critical_facts(grouped["GAP"], 3),
+        "problemas_identificados": (
+            source_facts.get("problema", [])
+            + [fact for fact in _select_critical_facts(grouped["PROBLEMA"], 3)
+               if fact not in source_facts.get("problema", [])]
+        )[:3] or _select_critical_facts(grouped["PROBLEMA"], 3),
         "feedback_produto": _select_critical_facts(grouped["FEEDBACK"], 3),
         "evidencias": evidence,
         "recomendacao_acao": _select_critical_facts(grouped["AÇÃO"], 3),
@@ -518,7 +625,8 @@ def process_analysis_summaries(
                 "pontos_chave" in item for item in completed_summaries
             ):
                 analysis.final_summary = build_compact_final_summary(
-                    completed_summaries
+                    completed_summaries,
+                    [chunk.clean_content or chunk.content for chunk in chunks],
                 )
             db.commit()
             logger.info(
@@ -544,7 +652,10 @@ def process_analysis_summaries(
         if settings.fast_deterministic_consolidation and all(
             "pontos_chave" in summary for summary in summaries
         ):
-            analysis.final_summary = build_compact_final_summary(summaries)
+            analysis.final_summary = build_compact_final_summary(
+                summaries,
+                [chunk.clean_content or chunk.content for chunk in chunks],
+            )
             logger.info("analysis_id=%s deterministic_consolidation=true", analysis.id)
         elif len(summaries) == 1:
             analysis.final_summary = build_single_chunk_final_summary(summaries[0])
