@@ -77,11 +77,22 @@ def _extract_deterministic_chunk_points(text: str) -> list[str]:
             points.append(point)
 
     for match in re.finditer(
-        r"\bTOTVS\s+(ERP|CRM|Fluig|Protheus|Datasul|RM|WMS)\b",
+        r"\b(TotoCRM|TOTVS\s+(?:ERP|CRM|Fluig|Protheus|Datasul|RM|WMS)|"
+        r"DataSuite|DataSoup|PD4000)\b",
         text,
         re.IGNORECASE,
     ):
-        add("PRODUTO", f"TOTVS {match.group(1).upper()}")
+        add("PRODUTO", match.group(1))
+
+    for match in re.finditer(
+        r"\b((?:time|área|parte)\s+(?:comercial|de vendas|de marketing)|"
+        r"(?:gerente|gestor|diretor)\s+(?:comercial|de vendas|de TI|de infraestrutura)|"
+        r"(?:vendedores?|consultores?|representantes?|distribuidores?|"
+        r"marketing|infraestrutura|TI)\b[^.;!?]{0,50})",
+        text,
+        re.IGNORECASE,
+    ):
+        add("PERSONA", match.group(1))
 
     for match in re.finditer(
         r"\[(?:CLIENTE|TOTVS)\s*-\s*([^\]]{2,80})\]", text, re.IGNORECASE
@@ -109,6 +120,14 @@ def _extract_deterministic_chunk_points(text: str) -> list[str]:
     )
     if gap:
         add("GAP", gap.group(1))
+
+    for match in re.finditer(
+        r"([^.!?]{0,100}(?:PDF|boleto|ordem de compra|EDI|importa(?:ção|r)|"
+        r"customiza(?:ção|r)|usuários? ficam presos no banco)[^.!?]{0,120})",
+        text,
+        re.IGNORECASE,
+    ):
+        add("GAP", match.group(1))
 
     for match in re.finditer(
         r"R\$\s*\d[\d.]*(?:,\d+)?(?:\s*(?:mil|milh(?:ão|ões)))?",
@@ -449,15 +468,26 @@ def generate_chunk_summary(
     clean_content: str, *, client: httpx.Client | None = None
 ) -> dict[str, Any]:
     prompt = f"""Você é um especialista em análise de reuniões corporativas.
-Analise somente o trecho e retorne JSON apenas com pontos_chave.
+Analise somente o trecho e retorne JSON apenas com pontos_chave. Diferencie
+claramente o que é uma demonstração hipotética do vendedor do que é uma
+necessidade, opinião ou decisão real do cliente.
 Use no máximo 6 pontos curtos. Prefixe cada ponto com exatamente uma categoria
 entre PRODUTO, PERSONA, SENTIMENTO, CHURN, OPORTUNIDADE, BUDGET, GAP,
 PROBLEMA, FEEDBACK, DÚVIDA, AÇÃO ou EVIDÊNCIA, seguida de dois-pontos e do
 fato concreto. OPORTUNIDADE é venda ou expansão de item já existente no
-portfólio TOTVS; GAP é necessidade que o portfólio atual não atende.
-Nunca devolva apenas nomes de categorias. Preserve nomes, números e negações.
-Copie apenas ações explicitamente mencionadas; não crie novas ações. O trecho
-contém fatos relevantes: extraia pelo menos um deles. Não invente fatos.
+portfólio TOTVS; GAP é necessidade que o portfólio atual não atende. BUDGET
+é somente orçamento, preço, investimento ou quantidade de licenças discutida
+para esta compra; não classifique métricas de exemplo (clientes, pedidos,
+atividades, quilômetros ou valores de demonstração) como budget. CHURN só pode
+ser usado com cancelamento, intenção de sair, insatisfação explícita ou risco
+de perda do fornecedor; não use a palavra "cancelado" de um pedido como churn.
+SENTIMENTO deve refletir a percepção geral do cliente, não o sentimento de um
+exemplo narrado pelo vendedor. PERSONA deve identificar a função profissional
+quando ela estiver explícita (vendas, marketing, gestão, TI, infraestrutura,
+consultor ou representante). Nunca devolva apenas nomes de categorias.
+Preserve nomes, números e negações. Copie apenas ações explicitamente
+mencionadas; não crie novas ações. O trecho contém fatos relevantes: extraia pelo menos um
+deles. Não invente fatos.
 
 TRECHO:
 {clean_content}"""
@@ -488,17 +518,35 @@ def consolidate_summaries(
     chunk_summaries: list[dict], *, client: httpx.Client | None = None
 ) -> dict[str, Any]:
     summaries_json = json.dumps(chunk_summaries, ensure_ascii=False)
-    prompt = f"""Você é um especialista em análise de reuniões corporativas.
-Consolide os resumos parciais em um objeto JSON com exatamente as chaves do
-schema. Identifique produto TOTVS, persona profissional, sentimento, risco de
-churn (0-100), oportunidade comercial apenas para algo existente no portfólio,
-score da oportunidade (0-100), budget, gaps, problemas, feedback, evidências,
-recomendações e dúvidas em aberto. Em evidencias, associe cada insight a um
-trecho literal disponível nos resumos. Quando não houver informação, use lista
-vazia, score 0, "não identificado" ou identificado=false. Remova duplicações
-e não invente fatos.
-Os resumos parciais contêm pontos prefixados por categoria; transforme os fatos
-concretos nos campos finais e descarte qualquer item que seja apenas um rótulo.
+    prompt = f"""Você é um especialista sênior em análise de reuniões de venda
+B2B da TOTVS. Consolide os resumos parciais em um objeto JSON com exatamente
+as chaves do schema. Reconstrua a reunião, não apenas conte os rótulos.
+Identifique produto TOTVS, persona profissional, sentimento geral do cliente,
+risco de churn (0-100), oportunidade comercial apenas para algo existente no
+portfólio, score da oportunidade (0-100), budget, gaps, problemas, feedback,
+evidências, recomendações e dúvidas em aberto.
+
+Regras obrigatórias:
+- Produto e persona devem ser preenchidos quando houver qualquer evidência
+  explícita nos resumos; não retorne lista vazia se houver CRM, vendedor,
+  marketing, gestor, consultor, representante, TI ou infraestrutura.
+- Sentimento é da reunião inteira: interesse/elogios indicam positivo,
+  preocupação com custo indica misto ou positivo com ressalva. Não confunda
+  exemplo de dashboard com opinião do cliente.
+- Churn só recebe score acima de 0 com evidência de cancelamento do contrato,
+  intenção de trocar de fornecedor, insatisfação explícita ou risco de perda.
+  Pedido cancelado, cliente não retido e oportunidade perdida são métricas,
+  não churn por si só.
+- Budget contém somente valores, preços, investimentos ou licenças da
+  negociação. Separe métricas operacionais como clientes, pedidos, atividades,
+  quilômetros e valores usados em exemplos de tela.
+- Oportunidade é expansão/venda de produto ou serviço TOTVS; gap é algo que o
+  portfólio não atende. Não transforme troca de computador em gap de produto.
+- Em evidencias, associe cada insight ao trecho literal mais próximo disponível
+  nos resumos. Remova duplicações e descarte fatos sem sustentação.
+Quando não houver informação, use lista vazia, score 0, "não identificado" ou
+identificado=false. Os resumos têm pontos prefixados por categoria, mas os
+rótulos podem estar errados: valide o sentido do texto antes de consolidar.
 
 RESUMOS PARCIAIS:
 {summaries_json}"""
@@ -532,3 +580,31 @@ def generate_embedding(
     if not all(isinstance(value, (int, float)) for value in embedding):
         raise OllamaResponseError("O embedding retornado contém valores não numéricos.")
     return [float(value) for value in embedding]
+
+
+def generate_chat_answer(
+    prompt: str, *, client: httpx.Client | None = None
+) -> str:
+    data = _post_json(
+        settings.ollama_generate_url,
+        {
+            "model": settings.model,
+            "prompt": prompt,
+            "stream": False,
+            "keep_alive": settings.ollama_keep_alive,
+            "think": False,
+            "options": {
+                "temperature": settings.chat_temperature,
+                "num_predict": settings.chat_num_predict,
+                "num_ctx": settings.chat_context_length,
+            },
+        },
+        client=client,
+        timeout=settings.chat_generate_timeout_seconds,
+    )
+    raw_response = data.get("response")
+    if not isinstance(raw_response, str) or not raw_response.strip():
+        raise OllamaResponseError(
+            "Resposta do Ollama não contém uma resposta textual para o chat."
+        )
+    return raw_response.strip()
