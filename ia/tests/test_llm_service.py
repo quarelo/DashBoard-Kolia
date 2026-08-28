@@ -11,6 +11,7 @@ from src.app.services.llm_service import (
     consolidate_summaries,
     complete_missing_fields,
     generate_chunk_summary,
+    generate_chat_answer,
     generate_embedding,
 )
 
@@ -95,6 +96,38 @@ def test_generate_embedding_uses_configured_model(monkeypatch):
         return httpx.Response(200, json={"embeddings": [[0.1, 0.2, 0.3]]})
 
     assert generate_embedding("conteúdo", client=client_for(handler)) == [0.1, 0.2, 0.3]
+
+
+def test_generate_chat_answer_uses_one_short_non_thinking_request(monkeypatch):
+    monkeypatch.setattr(settings, "model", "modelo-chat:latest")
+    monkeypatch.setattr(settings, "chat_num_predict", 512)
+    monkeypatch.setattr(settings, "chat_temperature", 0.0)
+    monkeypatch.setattr(settings, "chat_context_length", 8192)
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        payload = json.loads(request.content)
+        assert payload == {
+            "model": "modelo-chat:latest",
+            "prompt": "PERGUNTA: Quantas máquinas?",
+            "stream": False,
+            "keep_alive": settings.ollama_keep_alive,
+            "think": False,
+            "options": {
+                "temperature": 0.0,
+                "num_predict": 512,
+                "num_ctx": 8192,
+            },
+        }
+        return httpx.Response(200, json={"response": "  Foram 27 máquinas.  "})
+
+    answer = generate_chat_answer(
+        "PERGUNTA: Quantas máquinas?", client=client_for(handler)
+    )
+
+    assert answer == "Foram 27 máquinas."
+    assert len(requests) == 1
 
 
 def test_generate_embedding_rejects_unexpected_dimension(monkeypatch):

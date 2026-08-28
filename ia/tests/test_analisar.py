@@ -15,7 +15,7 @@ try:
     response = requests.post(
         URL,
         json=payload,
-    )
+    )   
 
     print(f"Status: {response.status_code}")
 

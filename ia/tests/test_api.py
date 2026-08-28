@@ -166,3 +166,145 @@ def test_category_evidence_returns_grouped_semantic_context(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["categories"]["budget"][0]["chunk_index"] == 3
+
+
+def test_chat_returns_grounded_answer_with_server_citations(monkeypatch):
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    app.dependency_overrides[get_db] = lambda: object()
+    monkeypatch.setattr(
+        main,
+        "answer_analysis_question",
+        lambda _db, current_id, payload: {
+            "analysis_id": current_id,
+            "answer": "São 27 máquinas por incompatibilidade com Windows 11.",
+            "citations": [{
+                "chunk_id": UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                "chunk_index": 48,
+                "excerpt": "27 máquinas precisam ser substituídas para Windows 11",
+                "similarity": 0.83,
+            }],
+            "grounded": True,
+            "fallback_reason": None,
+        },
+    )
+    try:
+        response = client.post(
+            f"/analises/{analysis_id}/chat",
+            json={
+                "question": "E qual foi o motivo?",
+                "history": [
+                    {"role": "user", "content": "Quantas máquinas serão trocadas?"},
+                    {"role": "assistant", "content": "Serão 27 máquinas."},
+                ],
+                "top_k": 4,
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["grounded"] is True
+    assert response.json()["citations"][0]["chunk_index"] == 48
+
+
+def test_chat_returns_safe_http_200_fallback(monkeypatch):
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    app.dependency_overrides[get_db] = lambda: object()
+    monkeypatch.setattr(
+        main,
+        "answer_analysis_question",
+        lambda _db, current_id, payload: {
+            "analysis_id": current_id,
+            "answer": "Não encontrei essa informação na transcrição desta reunião.",
+            "citations": [],
+            "grounded": False,
+            "fallback_reason": "insufficient_evidence",
+        },
+    )
+    try:
+        response = client.post(
+            f"/analises/{analysis_id}/chat",
+            json={"question": "Qual era a cor do carro do cliente?"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["grounded"] is False
+    assert response.json()["fallback_reason"] == "insufficient_evidence"
+
+
+def test_chat_maps_missing_analysis_to_404(monkeypatch):
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    app.dependency_overrides[get_db] = lambda: object()
+    monkeypatch.setattr(
+        main,
+        "answer_analysis_question",
+        lambda _db, _current_id, _payload: (_ for _ in ()).throw(
+            ValueError("Análise não encontrada.")
+        ),
+    )
+    try:
+        response = client.post(
+            f"/analises/{analysis_id}/chat", json={"question": "Qual produto?"}
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Análise não encontrada."
+
+
+def test_chat_maps_rag_not_ready_to_409(monkeypatch):
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    app.dependency_overrides[get_db] = lambda: object()
+    monkeypatch.setattr(
+        main,
+        "answer_analysis_question",
+        lambda _db, _current_id, _payload: (_ for _ in ()).throw(
+            main.RagNotReadyError("Embeddings ainda não estão prontos.")
+        ),
+    )
+    try:
+        response = client.post(
+            f"/analises/{analysis_id}/chat", json={"question": "Qual produto?"}
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert "Embeddings" in response.json()["detail"]
+
+
+def test_chat_hides_unexpected_infrastructure_errors(monkeypatch):
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    app.dependency_overrides[get_db] = lambda: object()
+    monkeypatch.setattr(
+        main,
+        "answer_analysis_question",
+        lambda _db, _current_id, _payload: (_ for _ in ()).throw(
+            RuntimeError("senha interna do banco")
+        ),
+    )
+    try:
+        response = client.post(
+            f"/analises/{analysis_id}/chat", json={"question": "Qual produto?"}
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Chat temporariamente indisponível."
+    assert "senha" not in response.text
+
+
+def test_chat_rejects_invalid_history_before_database_access():
+    response = client.post(
+        "/analises/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/chat",
+        json={
+            "question": "E quando?",
+            "history": [{"role": "user", "content": "Quem ficou responsável?"}],
+        },
+    )
+
+    assert response.status_code == 422
