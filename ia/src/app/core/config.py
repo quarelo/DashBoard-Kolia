@@ -19,8 +19,16 @@ class Settings(BaseSettings):
     ollama_embedding_timeout_seconds: float = 120.0
     ollama_read_timeout_retries: int = 1
     ollama_json_repair_enabled: bool = True
+    chat_num_predict: int = 512
+    chat_temperature: float = 0.0
+    chat_context_length: int = 8192
+    chat_similarity_threshold: float = 0.55
+    chat_max_evidence_chars: int = 2000
+    chat_generate_timeout_seconds: float = 120.0
     analysis_worker_concurrency: int = 1
-    chunk_processing_concurrency: int = 1
+    # Two concurrent chunk requests nearly halved the measured Ollama path on
+    # the reference transcription; keep it configurable for smaller hosts.
+    chunk_processing_concurrency: int = 2
     partial_chunk_count: int = 6
     max_llm_chunks: int = 15
     fast_transcription_retention_ratio: float = 0.05

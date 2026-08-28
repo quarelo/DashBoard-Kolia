@@ -106,6 +106,13 @@ VARIANTS = {
         "chunk_predict": 192, "consolidation_think": False,
         "consolidation_predict": 768, "concurrency": 2,
     },
+    "optimized-gemma3-parallel-2": {
+        "chunk_model": "gemma3:1b", "consolidation_model": "gemma3:1b",
+        "clean": True, "overlap": 0, "chunk_think": False,
+        "chunk_predict": 192, "consolidation_think": False,
+        "consolidation_predict": 768, "concurrency": 2,
+        "deterministic_final": True,
+    },
     "baseline-3b": {
         "chunk_model": "qwen2.5:3b", "consolidation_model": "qwen2.5:3b",
         "clean": False, "overlap": 200, "chunk_think": True,

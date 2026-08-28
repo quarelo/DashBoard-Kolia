@@ -11,6 +11,7 @@ from src.app.services.llm_service import (
     consolidate_summaries,
     complete_missing_fields,
     generate_chunk_summary,
+    generate_chat_answer,
     generate_embedding,
 )
 
@@ -32,6 +33,8 @@ def test_generate_chunk_summary_uses_configured_model_and_decodes_json(monkeypat
         assert payload["keep_alive"] == "30m"
         assert "não crie novas ações" in payload["prompt"].lower()
         assert "extraia pelo menos um" in payload["prompt"].lower()
+        assert "métricas de exemplo" in payload["prompt"].lower()
+        assert "não use a palavra" in payload["prompt"].lower()
         assert payload["format"]["type"] == "object"
         assert payload["format"]["additionalProperties"] is False
         assert set(payload["format"]["properties"]) == {"pontos_chave"}
@@ -66,6 +69,8 @@ def test_consolidate_summaries_uses_its_own_thinking_budget(monkeypatch):
         assert payload["options"]["num_predict"] == 1024
         assert payload["format"]["properties"]["oportunidade_comercial"]["maxItems"] == 3
         assert payload["format"]["properties"]["evidencias"]["maxItems"] == 24
+        assert "pedido cancelado" in payload["prompt"].lower()
+        assert "troca de computador" in payload["prompt"].lower()
         return httpx.Response(
             200,
             json={"response": json.dumps({"produto": ["TOTVS ERP"]})},
@@ -91,6 +96,38 @@ def test_generate_embedding_uses_configured_model(monkeypatch):
         return httpx.Response(200, json={"embeddings": [[0.1, 0.2, 0.3]]})
 
     assert generate_embedding("conteúdo", client=client_for(handler)) == [0.1, 0.2, 0.3]
+
+
+def test_generate_chat_answer_uses_one_short_non_thinking_request(monkeypatch):
+    monkeypatch.setattr(settings, "model", "modelo-chat:latest")
+    monkeypatch.setattr(settings, "chat_num_predict", 512)
+    monkeypatch.setattr(settings, "chat_temperature", 0.0)
+    monkeypatch.setattr(settings, "chat_context_length", 8192)
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        payload = json.loads(request.content)
+        assert payload == {
+            "model": "modelo-chat:latest",
+            "prompt": "PERGUNTA: Quantas máquinas?",
+            "stream": False,
+            "keep_alive": settings.ollama_keep_alive,
+            "think": False,
+            "options": {
+                "temperature": 0.0,
+                "num_predict": 512,
+                "num_ctx": 8192,
+            },
+        }
+        return httpx.Response(200, json={"response": "  Foram 27 máquinas.  "})
+
+    answer = generate_chat_answer(
+        "PERGUNTA: Quantas máquinas?", client=client_for(handler)
+    )
+
+    assert answer == "Foram 27 máquinas."
+    assert len(requests) == 1
 
 
 def test_generate_embedding_rejects_unexpected_dimension(monkeypatch):

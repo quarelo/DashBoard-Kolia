@@ -12,9 +12,11 @@ from src.app.schemas.analysis import (
     AnalysisDetailResponse, AnalyzeRequest, AnalyzeResponse, ChunkResponse,
     SemanticSearchRequest, SemanticSearchResponse,
     CategoryEvidenceResponse,
+    ChatRequest, ChatResponse,
 )
 from src.app.services.analysis_service import build_analysis_progress, prepare_analysis
 from src.app.services.analysis_worker import AnalysisWorker
+from src.app.services.chat_service import answer_analysis_question
 from src.app.services.rag_service import (
     RagNotReadyError,
     search_analysis_categories,
@@ -132,3 +134,25 @@ def category_evidence(
         raise HTTPException(status_code=404, detail=str(error)) from error
     except RagNotReadyError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post(
+    "/analises/{analysis_id}/chat",
+    response_model=ChatResponse,
+)
+def chat_with_analysis(
+    analysis_id: UUID,
+    payload: ChatRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return answer_analysis_question(db, analysis_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except RagNotReadyError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Chat temporariamente indisponível.",
+        ) from error
