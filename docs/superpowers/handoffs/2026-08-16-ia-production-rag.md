@@ -113,3 +113,44 @@ python ia/scripts/endpoint_benchmark.py \
 12. Recomendação de Ação — Sugere próximos passos baseados nos insights encontrados.
 
 13. Dúvidas em aberto - Encontra dúvidas que não foram esclarecidas para o cliente
+
+## Estado da validação final — 2026-08-19
+
+- Analysis ID da execução completa: `58c36af8-bf0d-4804-936d-67c430f8695b`.
+- Entrada: `ia/tests/test_analisar.py`, 40.008 tokens.
+- Resultado: `DONE`, 22/22 chunks e 22/22 embeddings.
+- Tempo total observado: 1.465,1 s (24min25s).
+- Resumos Ollama: 1.347,4 s (22min27s).
+- Maior amostra de CPU do Ollama: aproximadamente 401%.
+- Maior memória observada: Ollama aproximadamente 1,22 GiB; IA aproximadamente 116 MiB.
+- Suíte Docker após as alterações: 73 testes passando.
+
+### Melhorias já aplicadas
+
+- Concorrência padrão de chunks em 2.
+- Todos os chunks continuam sendo enviados ao Ollama.
+- Prompt diferencia demonstração hipotética de fato real do cliente.
+- Churn não considera pedido/ordem cancelada como cancelamento contratual.
+- Budget filtra métricas operacionais e busca licenças/orçamento.
+- Consolidação cruza resumos com a transcrição original para produto, persona,
+  sentimento, gaps e problemas.
+- Busca semântica por categorias implementada com pgvector em
+  `/analises/{analysis_id}/evidencias`.
+
+### Pendências prioritárias para continuar
+
+1. O campo `budget` ainda retorna parágrafos de licenciamento em vez de valores
+   objetivos e quantidades (20/25/40 licenças, valores R$ citados e indicação
+   de que não houve orçamento final aprovado).
+2. `oportunidade_comercial` ainda confunde temas operacionais (CNPJ e Windows
+   11) com venda/expansão TOTVS.
+3. `recomendacao_acao` ainda captura frases narrativas e precisa retornar
+   somente ações reais, responsáveis e prazos.
+4. `evidencias` está saturada por duplicações de produto/persona; reservar
+   espaço para budget, gaps, problemas e decisões.
+5. `feedback_produto` ainda está fraco e deve incluir elogios à integração,
+   modo offline e dashboards, além das críticas de customização/importação.
+
+Ao retomar, usar o mesmo Analysis ID/JSON final como baseline e não repetir a
+execução de 24 minutos sem antes testar essas correções em unitários e em uma
+amostra de chunks.
