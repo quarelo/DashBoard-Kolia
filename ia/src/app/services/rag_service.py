@@ -1,3 +1,5 @@
+import re
+import unicodedata
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -9,6 +11,120 @@ from src.app.services.llm_service import generate_embedding
 
 class RagNotReadyError(RuntimeError):
     pass
+
+
+_EXCERPT_STOPWORDS = {
+    "a", "ao", "aos", "as", "com", "como", "da", "das", "de", "do",
+    "dos", "e", "em", "essa", "esse", "esta", "este", "ficou", "na", "nas",
+    "no", "nos", "o", "os", "ou", "para", "pela", "pelo", "por", "qual",
+    "que", "se", "um", "uma", "era",
+}
+
+
+def _excerpt_terms(text: str) -> set[str]:
+    normalized = unicodedata.normalize("NFKD", text.lower())
+    normalized = "".join(
+        character for character in normalized
+        if not unicodedata.combining(character)
+    )
+    terms = set()
+    for token in re.findall(r"[a-z0-9]+", normalized):
+        if len(token) < 3 or token in _EXCERPT_STOPWORDS:
+            continue
+        singular = token[:-1] if token.endswith("s") and len(token) > 4 else token
+        if singular.startswith("substitu"):
+            singular = "substitu"
+        elif singular.startswith("revis"):
+            singular = "revis"
+        elif singular.startswith("estim"):
+            singular = "estim"
+        terms.add(singular)
+    return terms
+
+
+def excerpt_relevance_score(content: str, query: str) -> int:
+    query_terms = _excerpt_terms(query)
+    content_terms = _excerpt_terms(content)
+    overlap = len(query_terms & content_terms)
+    normalized_content = unicodedata.normalize("NFKD", content.lower())
+    normalized_content = "".join(
+        character for character in normalized_content
+        if not unicodedata.combining(character)
+    )
+    normalized_content = re.sub(
+        r"\[\s*(?:l|locutor)\s*\d+\s*\]\s*: ?",
+        " ",
+        normalized_content,
+    )
+    normalized_query = unicodedata.normalize("NFKD", " ".join(query.lower().split()))
+    normalized_query = "".join(
+        character for character in normalized_query
+        if not unicodedata.combining(character)
+    )
+    asks_quantity = bool(re.search(
+        r"\b(quant[oa]s?|quanto|estimativa|número|numero|valor|licenças?|licencas?)\b",
+        normalized_query,
+    ))
+    close_number_and_term = False
+    if asks_quantity:
+        unit_match = re.search(
+            r"\bquant(?:as|os|a|o)\s+([a-z0-9]+)", normalized_query
+        )
+        proximity_terms = (
+            _excerpt_terms(unit_match.group(1)) if unit_match else query_terms
+        )
+        for term in proximity_terms:
+            if len(term) < 4:
+                continue
+            escaped = re.escape(term)
+            if re.search(
+                rf"(?:\d[\d.,]*.{{0,15}}\b{escaped}\w*|"
+                rf"\b{escaped}\w*.{{0,15}}\d)",
+                normalized_content,
+                re.DOTALL,
+            ):
+                close_number_and_term = True
+                break
+    quantity_bonus = 25 if close_number_and_term else (
+        2 if asks_quantity and re.search(r"\d", normalized_content) else 0
+    )
+    asks_temporal = bool(re.search(
+        r"\b(quando|mes|meses|prazo|data|dia)\b", normalized_query
+    ))
+    temporal_value = bool(re.search(
+        r"\b(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|"
+        r"setembro|outubro|novembro|dezembro|segunda(?:-feira)?|"
+        r"terca(?:-feira)?|quarta(?:-feira)?|quinta(?:-feira)?|"
+        r"sexta(?:-feira)?|sabado|domingo|\d{1,2}/\d{1,2}(?:/\d{2,4})?)\b",
+        normalized_content,
+    ))
+    temporal_bonus = 25 if asks_temporal and temporal_value else 0
+    return overlap * 10 + quantity_bonus + temporal_bonus
+
+
+def extract_relevant_excerpt(content: str, query: str, max_chars: int) -> str:
+    max_chars = max(1, min(int(max_chars), 2000))
+    if len(content) <= max_chars:
+        return content
+
+    step = max(100, max_chars // 3)
+    starts = list(range(0, len(content) - max_chars + 1, step))
+    starts.append(len(content) - max_chars)
+
+    best_start = 0
+    best_score = float("-inf")
+    for start in starts:
+        window = content[start:start + max_chars]
+        score = excerpt_relevance_score(window, query)
+        if score > best_score:
+            best_start = start
+            best_score = score
+
+    if best_start:
+        next_space = content.find(" ", best_start)
+        if 0 <= next_space - best_start <= 40:
+            best_start = next_space + 1
+    return content[best_start:best_start + max_chars]
 
 
 # One embedding query is reused by related fields. This keeps semantic
@@ -58,6 +174,7 @@ def search_analysis_chunks(
     analysis_id: UUID,
     query: str,
     top_k: int = 5,
+    excerpt_chars: int = 700,
 ) -> dict:
     analysis = db.get(MeetingAnalysis, analysis_id)
     if analysis is None:
@@ -92,7 +209,7 @@ def search_analysis_chunks(
         results.append({
             "chunk_id": chunk.id,
             "chunk_index": chunk.chunk_index,
-            "excerpt": content[:700],
+            "excerpt": extract_relevant_excerpt(content, query, excerpt_chars),
             "similarity": round(similarity, 4),
         })
     return {
