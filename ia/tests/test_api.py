@@ -1,13 +1,20 @@
+import jwt
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
 from uuid import UUID
 
+from src.app.core.config import settings
 from src.app.core.database import get_db
 from src.app import main
 from src.app.main import app
 
 
 client = TestClient(app)
+
+
+def _auth_header() -> dict:
+    token = jwt.encode({"sub": "test@kolia.com"}, settings.secret_key, algorithm=settings.algorithm)
+    return {"Authorization": f"Bearer {token}"}
 
 
 def test_health_identifies_ia_service():
@@ -20,6 +27,33 @@ def test_health_identifies_ia_service():
     }
 
 
+def test_analisar_requires_bearer_token():
+    response = client.post(
+        "/analisar",
+        json={
+            "meeting_id": "55555555-5555-5555-5555-555555555555",
+            "title": "Reunião",
+            "transcription": "Conteúdo qualquer.",
+        },
+    )
+
+    assert response.status_code == 401
+
+
+def test_analisar_rejects_invalid_token():
+    response = client.post(
+        "/analisar",
+        json={
+            "meeting_id": "55555555-5555-5555-5555-555555555555",
+            "title": "Reunião",
+            "transcription": "Conteúdo qualquer.",
+        },
+        headers={"Authorization": "Bearer not-a-valid-token"},
+    )
+
+    assert response.status_code == 401
+
+
 def test_analisar_rejects_invalid_payload_before_database_access():
     response = client.post(
         "/analisar",
@@ -28,6 +62,7 @@ def test_analisar_rejects_invalid_payload_before_database_access():
             "title": "",
             "transcription": "",
         },
+        headers=_auth_header(),
     )
 
     assert response.status_code == 422
@@ -63,6 +98,7 @@ def test_analisar_returns_accepted_and_queues_analysis(monkeypatch):
                 "title": "Reunião com falha",
                 "transcription": "Cliente relatou erro na integração.",
             },
+            headers=_auth_header(),
         )
     finally:
         app.dependency_overrides.clear()
@@ -128,6 +164,7 @@ def test_semantic_search_returns_ranked_evidence(monkeypatch):
         response = client.post(
             f"/analises/{analysis_id}/buscar",
             json={"query": "quantas máquinas precisam ser trocadas?", "top_k": 3},
+            headers=_auth_header(),
         )
     finally:
         app.dependency_overrides.clear()
@@ -159,7 +196,9 @@ def test_category_evidence_returns_grouped_semantic_context(monkeypatch):
     )
     try:
         response = client.get(
-            f"/analises/{analysis_id}/evidencias", params={"top_k": 2}
+            f"/analises/{analysis_id}/evidencias",
+            params={"top_k": 2},
+            headers=_auth_header(),
         )
     finally:
         app.dependency_overrides.clear()
