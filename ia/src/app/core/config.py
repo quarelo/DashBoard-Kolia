@@ -3,6 +3,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg2://kolia:kolia@postgres:5432/kolia"
+    secret_key: str
+    algorithm: str = "HS256"
     max_tokens_per_chunk: int = 2000
     overlap_tokens: int = 120
     embedding_dim: int = 768

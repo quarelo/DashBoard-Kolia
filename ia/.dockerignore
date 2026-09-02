@@ -5,3 +5,6 @@ logs
 .git
 Dockerfile
 .pytest_cache
+.env
+.env.*
+!.env.example

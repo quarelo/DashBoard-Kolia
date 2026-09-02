@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from src.app.core.config import settings
 from src.app.core.database import SessionLocal, get_db, init_database
+from src.app.core.security import verify_token
 from src.app.models.analysis import MeetingAnalysis, MeetingChunk
 from src.app.schemas.analysis import (
     AnalysisDetailResponse, AnalyzeRequest, AnalyzeResponse, ChunkResponse,
@@ -52,7 +53,7 @@ def health():
     return {"status": "ok", "service": "kolia-ia-service"}
 
 
-@app.post("/analisar", response_model=AnalyzeResponse, status_code=202)
+@app.post("/analisar", response_model=AnalyzeResponse, status_code=202, dependencies=[Depends(verify_token)])
 def analisar(payload: AnalyzeRequest, db: Session = Depends(get_db)):
     analysis = prepare_analysis(db, payload)
     analysis_worker.submit(analysis.id)
@@ -74,7 +75,7 @@ def _chunks_for_analysis(db: Session, analysis_id: UUID) -> list[MeetingChunk]:
     return list(db.execute(statement).scalars().all())
 
 
-@app.get("/analises/{analysis_id}", response_model=AnalysisDetailResponse)
+@app.get("/analises/{analysis_id}", response_model=AnalysisDetailResponse, dependencies=[Depends(verify_token)])
 def get_analysis(analysis_id: UUID, db: Session = Depends(get_db)):
     analysis = db.get(MeetingAnalysis, analysis_id)
     if not analysis:
@@ -82,7 +83,7 @@ def get_analysis(analysis_id: UUID, db: Session = Depends(get_db)):
     return _detail(analysis, _chunks_for_analysis(db, analysis.id))
 
 
-@app.get("/analises/by-meeting/{meeting_id}", response_model=AnalysisDetailResponse)
+@app.get("/analises/by-meeting/{meeting_id}", response_model=AnalysisDetailResponse, dependencies=[Depends(verify_token)])
 def get_analysis_by_meeting(meeting_id: UUID, db: Session = Depends(get_db)):
     statement = select(MeetingAnalysis).where(MeetingAnalysis.external_meeting_id == meeting_id).order_by(MeetingAnalysis.created_at.desc()).limit(1)
     analysis = db.execute(statement).scalar_one_or_none()
@@ -91,7 +92,7 @@ def get_analysis_by_meeting(meeting_id: UUID, db: Session = Depends(get_db)):
     return _detail(analysis, _chunks_for_analysis(db, analysis.id))
 
 
-@app.get("/analises/{analysis_id}/chunks", response_model=list[ChunkResponse])
+@app.get("/analises/{analysis_id}/chunks", response_model=list[ChunkResponse], dependencies=[Depends(verify_token)])
 def list_chunks(analysis_id: UUID, db: Session = Depends(get_db)):
     if not db.get(MeetingAnalysis, analysis_id):
         raise HTTPException(status_code=404, detail="Análise não encontrada.")
@@ -103,6 +104,7 @@ def list_chunks(analysis_id: UUID, db: Session = Depends(get_db)):
 @app.post(
     "/analises/{analysis_id}/buscar",
     response_model=SemanticSearchResponse,
+    dependencies=[Depends(verify_token)],
 )
 def semantic_search(
     analysis_id: UUID,
@@ -122,6 +124,7 @@ def semantic_search(
 @app.get(
     "/analises/{analysis_id}/evidencias",
     response_model=CategoryEvidenceResponse,
+    dependencies=[Depends(verify_token)],
 )
 def category_evidence(
     analysis_id: UUID,
