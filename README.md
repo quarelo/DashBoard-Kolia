@@ -1,5 +1,9 @@
 # KOLIA IA Service
 
+O backend agora aceita reuniões em CSV/JSON com deduplicação persistida e envio
+idempotente para análise. Consulte o [fluxo de importação](docs/meeting-import-flow.md)
+para contratos, uso pelo Swagger e testes. O frontend ainda usa fixtures.
+
 Serviço FastAPI responsável por analisar transcrições, dividi-las em chunks e
 persistir resumos e embeddings de desenvolvimento no Postgres com pgvector.
 
