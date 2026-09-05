@@ -34,6 +34,37 @@ from src.app.services.token_service import count_tokens, split_text_by_tokens
 
 logger = logging.getLogger("uvicorn.error")
 
+# Human wording for a motive code, used when the score came from declared codes
+# rather than from rule-matched sentences.
+MOTIVE_LABELS = {
+    "AMEACA_CANCELAMENTO": "Cliente falou em cancelar ou encerrar o contrato",
+    "INSATISFACAO_EXPLICITA": "Cliente demonstrou insatisfação explícita",
+    "MENCAO_CONCORRENTE": "Cliente citou concorrente ou alternativa",
+    "RECLAMACAO_PRODUTO": "Cliente relatou falha ou limitação do produto",
+    "INATIVIDADE_PROLONGADA": "Cliente sem uso ou sem retorno há tempo",
+    "PEDIDO_EXPANSAO": "Cliente pediu ampliar contrato ou escopo",
+    "MENCAO_BUDGET": "Orçamento ou valor disponível citado",
+    "PRAZO_DEFINIDO": "Prazo ou data concreta combinada",
+    "INTERESSE_NOVO_MODULO": "Interesse em produto ainda não usado",
+    "ELOGIO_CLIENTE": "Cliente elogiou produto ou atendimento",
+}
+
+# What a quote of each category tells whoever reads the dashboard.
+EVIDENCE_MEANING = {
+    "PRODUTO": "Produto ou módulo citado na conversa.",
+    "PERSONA": "Função ou área envolvida na decisão.",
+    "SENTIMENTO": "Percepção do cliente sobre a solução.",
+    "CHURN": "Sinal de risco de perder o cliente.",
+    "OPORTUNIDADE": "Abertura para venda ou expansão.",
+    "BUDGET": "Valor, orçamento ou licenciamento discutido.",
+    "GAP": "Necessidade que o portfólio atual não atende.",
+    "PROBLEMA": "Dor ou obstáculo relatado.",
+    "FEEDBACK": "Avaliação sobre produto já usado.",
+    "DÚVIDA": "Pergunta ainda sem resposta.",
+    "AÇÃO": "Próximo passo combinado.",
+    "EVIDÊNCIA": "Trecho concreto que sustenta a análise.",
+}
+
 
 _CRITICAL_FACT_PATTERN = re.compile(
     r"(?:R\$|\d|segunda|terça|quarta|quinta|sexta|sábado|domingo|"
@@ -471,9 +502,13 @@ def build_compact_final_summary(
 
     opportunity_score = calculate_opportunity_score(all_opportunity_motives)
 
-    # For justifications, use the facts that contributed to the score
+    # The justification has to come from whatever produced the score. Reading it
+    # only from rule-matched facts left "score 30" next to "nenhum sinal
+    # identificado" whenever the codes came from the model instead of the rules.
     churn_signals = [fact for fact in filtered_churn_facts
                      if churn_motives(fact)][:3]
+    if all_churn_motives and not churn_signals:
+        churn_signals = [MOTIVE_LABELS.get(code, code) for code in all_churn_motives[:3]]
 
     sentiment_facts = grouped["SENTIMENTO"]
     sentiment_text = " ".join(sentiment_facts).casefold()
@@ -485,17 +520,29 @@ def build_compact_final_summary(
         sentiment = "neutro"
     else:
         sentiment = "não identificado"
+    # Round-robin, not category by category: iterating in dict order let PERSONA's
+    # twenty facts fill all 24 slots and pushed every other category out, so the
+    # evidence described one facet of the meeting instead of the meeting.
     evidence = []
-    for category, facts in grouped.items():
-        for fact in facts:
+    ordered = [(name, list(facts)) for name, facts in grouped.items() if facts]
+    depth = 0
+    while ordered and len(evidence) < 24:
+        for category, facts in ordered:
+            if depth >= len(facts):
+                continue
+            fact = facts[depth]
             evidence.append({
                 "categoria": category.casefold(),
-                "insight": fact,
+                # `insight` used to be the quote repeated verbatim, which told a
+                # reader nothing the quote had not already said. It now carries
+                # what the category means for the deal; the quote stays in `trecho`.
+                "insight": EVIDENCE_MEANING.get(category, "Trecho relevante da reunião."),
                 "trecho": fact,
             })
             if len(evidence) == 24:
                 break
-        if len(evidence) == 24:
+        depth += 1
+        if depth >= max(len(facts) for _name, facts in ordered):
             break
     source_facts = _extract_source_facts(source_texts or []) if source_texts else {}
     source_budget = source_facts.get("budget", [])
