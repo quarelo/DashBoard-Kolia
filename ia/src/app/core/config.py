@@ -11,6 +11,16 @@ ROOT_ENV = Path(__file__).resolve().parents[4] / ".env"
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg2://kolia:kolia@postgres:5432/kolia"
+    # The IA verifies tokens the backend issued, so both must read the same key.
+    # The single root .env spells it JWT_SECRET, which is also the name Compose
+    # interpolates; accepting either keeps this service starting from that file.
+    # min_length because PyJWT raises InvalidKeyError per request on an empty key,
+    # which surfaces as a 500 on every authenticated call instead of a boot error.
+    secret_key: str = Field(
+        min_length=32,
+        validation_alias=AliasChoices("SECRET_KEY", "JWT_SECRET"),
+    )
+    algorithm: str = "HS256"
     max_tokens_per_chunk: int = 2000
     overlap_tokens: int = 120
     embedding_dim: int = 768
