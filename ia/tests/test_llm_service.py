@@ -37,8 +37,8 @@ def test_generate_chunk_summary_uses_configured_model_and_decodes_json(monkeypat
         assert "não use a palavra" in payload["prompt"].lower()
         assert payload["format"]["type"] == "object"
         assert payload["format"]["additionalProperties"] is False
-        # Motive arrays are enum-constrained here, so scoring reads catalogue
-        # codes instead of matching however the model worded the fact.
+        # Schema and prompt always agree: with classification on (the default,
+        # because dropping the catalogue measured 2.3x slower) both carry it.
         assert set(payload["format"]["properties"]) == {
             "pontos_chave", "motivos_churn", "motivos_oportunidade"}
         assert payload["format"]["properties"]["pontos_chave"]["minItems"] == 1
@@ -429,3 +429,46 @@ def test_generation_reports_exhausted_read_timeout(monkeypatch):
         generate_chunk_summary("conteúdo", client=client_for(handler))
 
     assert attempts == 2
+
+
+def test_motive_schema_appears_only_when_classification_is_enabled(monkeypatch):
+    """Prompt and schema have to agree: both carry the catalogue, or neither does."""
+    monkeypatch.setattr(settings, "chunk_motive_classification", True)
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        seen["properties"] = set(payload["format"]["properties"])
+        seen["prompt"] = payload["prompt"]
+        return httpx.Response(
+            200, json={"response": '{"pontos_chave":["EVIDÊNCIA: ok"],'
+                                   '"motivos_churn":["AMEACA_CANCELAMENTO"],'
+                                   '"motivos_oportunidade":[]}'}
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    result = generate_chunk_summary("conteúdo", client=client)
+
+    assert seen["properties"] == {
+        "pontos_chave", "motivos_churn", "motivos_oportunidade"}
+    assert "AMEACA_CANCELAMENTO" in seen["prompt"]
+    assert result["motivos_churn"] == ["AMEACA_CANCELAMENTO"]
+
+
+def test_schema_drops_motives_when_classification_is_disabled(monkeypatch):
+    """The other direction of the same rule: no catalogue in the prompt means no
+    motive fields in the schema. Asking for fields the prompt stopped explaining
+    made the model truncate on 8 of 14 real meetings."""
+    monkeypatch.setattr(settings, "chunk_motive_classification", False)
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        seen["properties"] = set(payload["format"]["properties"])
+        seen["prompt"] = payload["prompt"]
+        return httpx.Response(200, json={"response": '{"pontos_chave":["EVIDÊNCIA: ok"]}'})
+
+    generate_chunk_summary("conteúdo", client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    assert seen["properties"] == {"pontos_chave"}
+    assert "AMEACA_CANCELAMENTO" not in seen["prompt"]

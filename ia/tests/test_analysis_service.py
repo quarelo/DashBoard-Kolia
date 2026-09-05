@@ -511,9 +511,14 @@ def test_single_compact_chunk_preserves_key_points_as_evidence():
 
     result = analysis_service.build_single_chunk_final_summary(summary)
 
-    assert [item["insight"] for item in result["evidencias"]] == [
+    # The quote lives in `trecho`; `insight` says what the category means, instead
+    # of repeating the quote word for word as it used to.
+    assert [item["trecho"] for item in result["evidencias"]] == [
         "TOTVS ERP", "qual é o prazo?"
     ]
+    assert [item["categoria"] for item in result["evidencias"]] == ["produto", "dúvida"]
+    for item in result["evidencias"]:
+        assert item["insight"] != item["trecho"]
 
 
 def test_compact_final_summary_routes_prefixed_facts_without_llm():
