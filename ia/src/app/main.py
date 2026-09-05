@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,8 @@ from src.app.schemas.analysis import (
 )
 from src.app.services.analysis_service import build_analysis_progress, prepare_analysis
 from src.app.services.analysis_worker import AnalysisWorker
+from src.app.services.analysis_submission import SubmissionConflict, submit_idempotent
+from src.app.services.eta_service import estimate_analysis, estimate_backlog, estimate_batch
 from src.app.services.chat_service import answer_analysis_question
 from src.app.services.rag_service import (
     RagNotReadyError,
@@ -53,10 +55,25 @@ def health():
 
 
 @app.post("/analisar", response_model=AnalyzeResponse, status_code=202)
-def analisar(payload: AnalyzeRequest, db: Session = Depends(get_db)):
-    analysis = prepare_analysis(db, payload)
-    analysis_worker.submit(analysis.id)
-    progress = build_analysis_progress(analysis, [])
+def analisar(
+    payload: AnalyzeRequest,
+    db: Session = Depends(get_db),
+    idempotency_key: str | None = Header(
+        default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
+    ),
+):
+    if idempotency_key is None:
+        analysis = prepare_analysis(db, payload)
+        analysis_worker.submit(analysis.id)
+    else:
+        try:
+            analysis = submit_idempotent(
+                db, payload, idempotency_key, prepare_analysis, analysis_worker.submit,
+            )
+        except SubmissionConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+    chunks = _chunks_for_analysis(db, analysis.id) if idempotency_key is not None else []
+    progress = build_analysis_progress(analysis, chunks)
     return AnalyzeResponse(analysis_id=analysis.id, meeting_id=analysis.external_meeting_id, status=analysis.status, total_tokens=analysis.total_tokens, final_summary=analysis.final_summary, error_message=analysis.error_message, **progress)
 
 
@@ -89,6 +106,29 @@ def get_analysis_by_meeting(meeting_id: UUID, db: Session = Depends(get_db)):
     if not analysis:
         raise HTTPException(status_code=404, detail="Análise não encontrada para esta reunião.")
     return _detail(analysis, _chunks_for_analysis(db, analysis.id))
+
+
+@app.get("/fila")
+def queue_estimate(db: Session = Depends(get_db)):
+    """Everything still unfinished, and roughly how long the backlog needs."""
+    return estimate_backlog(db)
+
+
+@app.get("/estimativa")
+def batch_estimate(analyses: int = Query(ge=1, le=100_000),
+                   chunks_each: int = Query(default=1, ge=1, le=1_000),
+                   db: Session = Depends(get_db)):
+    """Cost of a batch that has not been submitted yet, e.g. a whole CSV import."""
+    return estimate_batch(db, analyses=analyses, chunks_each=chunks_each)
+
+
+@app.get("/analises/{analysis_id}/estimativa")
+def analysis_estimate(analysis_id: UUID, db: Session = Depends(get_db)):
+    analysis = db.get(MeetingAnalysis, analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Análise não encontrada.")
+    return {"analysis_id": analysis.id, "status": analysis.status,
+            "total_chunks": analysis.total_chunks, **estimate_analysis(db, analysis)}
 
 
 @app.get("/analises/{analysis_id}/chunks", response_model=list[ChunkResponse])
