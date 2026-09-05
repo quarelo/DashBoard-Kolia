@@ -31,3 +31,30 @@ def test_split_text_by_tokens_rejects_invalid_limits():
         assert str(error) == "overlap_tokens must be smaller than max_tokens"
     else:
         raise AssertionError("invalid chunk limits must be rejected")
+
+
+def test_chunks_preserve_the_original_spacing():
+    """Chunks are sliced from the text, not rebuilt by joining tokens.
+
+    Joining with " " rewrote "[L67]:" as "[ L67 ] :" and "sexta-feira" as
+    "sexta - feira", and that mangled wording reached every quoted evidence
+    string in a multi-chunk analysis.
+    """
+    text = " ".join(
+        f"[L{index}]: entrega na sexta-feira, R$ 40 mil (item {index})."
+        for index in range(1, 61)
+    )
+    chunks = split_text_by_tokens(text, 60, 5)
+
+    assert len(chunks) > 1, "o caso só aparece quando o texto é realmente fatiado"
+    joined = " ".join(chunks)
+    assert "[ L" not in joined
+    assert "sexta - feira" not in joined
+    assert "sexta-feira" in joined
+    assert "R$ 40" in joined
+
+
+def test_every_chunk_is_a_literal_substring_of_the_input():
+    text = " ".join(f"[L{i}]: fato número {i}; detalhe extra." for i in range(1, 41))
+    for chunk in split_text_by_tokens(text, 40, 4):
+        assert chunk in text

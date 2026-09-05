@@ -14,9 +14,14 @@ def split_text_by_tokens(text: str, max_tokens: int, overlap_tokens: int) -> lis
         raise ValueError("overlap_tokens must not be negative")
     if overlap_tokens >= max_tokens:
         raise ValueError("overlap_tokens must be smaller than max_tokens")
-    tokens = _TOKEN_PATTERN.findall(text)
-    if not tokens:
+    # Spans, not just the token strings: chunks are sliced out of the original
+    # text so punctuation and spacing survive. Re-joining tokens with " " used to
+    # rewrite "[L67]:" as "[ L67 ] :" and "sexta-feira" as "sexta - feira", and
+    # that mangled wording then showed up in every quoted piece of evidence.
+    spans = [match.span() for match in _TOKEN_PATTERN.finditer(text)]
+    if not spans:
         return []
+    tokens = [text[start:end] for start, end in spans]
     if len(tokens) <= max_tokens:
         return [text.strip()]
     chunks, start = [], 0
@@ -31,7 +36,7 @@ def split_text_by_tokens(text: str, max_tokens: int, overlap_tokens: int) -> lis
             ]
             if sentence_boundaries:
                 end = sentence_boundaries[-1]
-        chunks.append(" ".join(tokens[start:end]).strip())
+        chunks.append(text[spans[start][0]:spans[end - 1][1]].strip())
         if end >= len(tokens):
             break
         start = end - overlap_tokens
