@@ -1,4 +1,12 @@
+from pathlib import Path
+
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# One .env for the whole repo, at the root, next to docker-compose.yml.
+# Inside a container this path does not exist and Compose supplies the same
+# values as real environment variables, which outrank any file regardless.
+ROOT_ENV = Path(__file__).resolve().parents[4] / ".env"
 
 
 class Settings(BaseSettings):
@@ -33,12 +41,19 @@ class Settings(BaseSettings):
     max_llm_chunks: int = 15
     fast_transcription_retention_ratio: float = 0.05
     fast_deterministic_consolidation: bool = True
-    model: str = "qwen2.5:3b"
-    chunk_model: str = "gemma3:1b"
-    consolidation_model: str = "gemma3:1b"
+    model: str = Field(default="qwen2.5:3b", validation_alias=AliasChoices("MODEL", "OLLAMA_MODEL"))
+    chunk_model: str = Field(default="gemma3:1b", validation_alias=AliasChoices("CHUNK_MODEL", "OLLAMA_CHUNK_MODEL"))
+    consolidation_model: str = Field(default="gemma3:1b", validation_alias=AliasChoices("CONSOLIDATION_MODEL", "OLLAMA_CONSOLIDATION_MODEL"))
     embedding_model: str = "nomic-embed-text"
+    # Seeds for the ETA fit before this host has finished any analysis.
+    # Anchored on measured 1-chunk runs (~32s) and 48-chunk runs (~16s/chunk).
+    eta_default_overhead_seconds: float = 16.0
+    eta_default_seconds_per_chunk: float = 16.0
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=ROOT_ENV, env_file_encoding="utf-8", extra="ignore",
+        protected_namespaces=(),
+    )
 
 
 settings = Settings()
