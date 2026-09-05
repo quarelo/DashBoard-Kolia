@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from src.app.core.config import settings
+from src.app.services.scoring_service import ChurnMotive, OpportunityMotive
 
 
 class OllamaError(RuntimeError):
@@ -45,7 +46,29 @@ def _normalize_chunk_summary(summary: dict[str, Any]) -> dict[str, Any]:
             normalized.append(f"{category}: {fact}")
         if len(normalized) == 12:
             break
-    return {"pontos_chave": normalized}
+    return {
+        "pontos_chave": normalized,
+        # Kept alongside the free-text points: the schema already guarantees these
+        # are catalogue codes, so scoring reads them instead of matching wording.
+        "motivos_churn": _valid_codes(summary.get("motivos_churn"), CHURN_MOTIVE_CODES),
+        "motivos_oportunidade": _valid_codes(
+            summary.get("motivos_oportunidade"), OPPORTUNITY_MOTIVE_CODES),
+    }
+
+
+def _valid_codes(values: Any, allowed: list[str]) -> list[str]:
+    """Keep declared codes only, de-duplicated, order preserved.
+
+    The schema constrains the model, but a salvaged or legacy response can still
+    carry anything, and an unknown code must never reach the scoring table.
+    """
+    if not isinstance(values, list):
+        return []
+    seen: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value in allowed and value not in seen:
+            seen.append(value)
+    return seen
 
 
 def _salvage_chunk_summary(raw: str) -> dict[str, Any] | None:
@@ -188,6 +211,13 @@ def _extract_json_object(raw: str) -> dict[str, Any] | None:
     return None
 
 
+# Motive codes are constrained by the schema itself, so the model cannot invent
+# a label and scoring never depends on its phrasing. This removes the old
+# failure mode: free text like "potencial de perda" had to match a regex
+# vocabulary, and 250 of 500 real churn signals did not.
+CHURN_MOTIVE_CODES = [m.value for m in ChurnMotive]
+OPPORTUNITY_MOTIVE_CODES = [m.value for m in OpportunityMotive]
+
 CHUNK_SUMMARY_SCHEMA = {
     "type": "object",
     "properties": {
@@ -204,8 +234,18 @@ CHUNK_SUMMARY_SCHEMA = {
             "minItems": 1,
             "maxItems": 12,
         },
+        "motivos_churn": {
+            "type": "array",
+            "items": {"type": "string", "enum": CHURN_MOTIVE_CODES},
+            "maxItems": 5,
+        },
+        "motivos_oportunidade": {
+            "type": "array",
+            "items": {"type": "string", "enum": OPPORTUNITY_MOTIVE_CODES},
+            "maxItems": 5,
+        },
     },
-    "required": ["pontos_chave"],
+    "required": ["pontos_chave", "motivos_churn", "motivos_oportunidade"],
     "additionalProperties": False,
 }
 
@@ -489,6 +529,24 @@ Preserve nomes, números e negações. Copie apenas ações explicitamente
 mencionadas; não crie novas ações. O trecho contém fatos relevantes: extraia pelo menos um
 deles. Não invente fatos.
 
+Além de pontos_chave, classifique o trecho nos catálogos abaixo, devolvendo
+apenas os códigos que o trecho sustenta. Listas vazias são a resposta correta
+quando não houver sinal; não force uma classificação.
+
+motivos_churn:
+  AMEACA_CANCELAMENTO    cliente fala em cancelar, encerrar ou rescindir
+  INSATISFACAO_EXPLICITA cliente demonstra insatisfação ou frustração
+  MENCAO_CONCORRENTE     cliente cita outro fornecedor ou alternativa
+  RECLAMACAO_PRODUTO     cliente relata falha, erro ou limitação do produto
+  INATIVIDADE_PROLONGADA cliente sem uso, sem compra ou sem retorno há tempo
+
+motivos_oportunidade:
+  PEDIDO_EXPANSAO        cliente pede ampliar contrato, licenças ou escopo
+  MENCAO_BUDGET          cliente cita orçamento, verba ou valor disponível
+  PRAZO_DEFINIDO         há data ou prazo concreto para decisão ou entrega
+  INTERESSE_NOVO_MODULO  cliente demonstra interesse em produto ainda não usado
+  ELOGIO_CLIENTE         cliente elogia produto, entrega ou atendimento
+
 TRECHO:
 {clean_content}"""
     summary = _generate_json(
@@ -511,7 +569,13 @@ TRECHO:
             merged.append(point)
         if len(merged) == 12:
             break
-    return {"pontos_chave": merged}
+    return {
+        "pontos_chave": merged,
+        # Carry the catalogue codes through: rebuilding the dict here used to drop
+        # them, leaving scoring back on wording-based inference.
+        "motivos_churn": normalized.get("motivos_churn", []),
+        "motivos_oportunidade": normalized.get("motivos_oportunidade", []),
+    }
 
 
 def consolidate_summaries(
