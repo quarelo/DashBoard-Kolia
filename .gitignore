@@ -25,3 +25,6 @@ dist-ssr
 .env
 __pycache__
 .pytest_cache
+.venv
+venv
+.poc_password
