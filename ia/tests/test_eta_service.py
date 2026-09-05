@@ -25,6 +25,15 @@ def _sqlite_jsonb(_type, _compiler, **_kwargs):
 
 BASE = datetime(2026, 8, 19, 12, 0, 0)
 
+def auth_header() -> dict:
+    """Routes that expose analysis data now require a backend-issued token."""
+    import jwt
+    from src.app.core.config import settings
+
+    return {"Authorization": "Bearer " + jwt.encode(
+        {"sub": "test@kolia.com"}, settings.secret_key, algorithm=settings.algorithm)}
+
+
 
 @pytest.fixture
 def db():
@@ -170,19 +179,19 @@ def test_endpoints_expose_queue_batch_and_per_analysis_estimates(db, monkeypatch
     main.app.dependency_overrides[get_db] = lambda: db
     try:
         client = TestClient(main.app)
-        fila = client.get("/fila").json()
+        fila = client.get("/fila", headers=auth_header()).json()
         assert fila["pending_analyses"] == 1
         assert fila["estimated_seconds_remaining"] > 0
 
-        lote = client.get("/estimativa", params={"analyses": 500}).json()
+        lote = client.get("/estimativa", params={"analyses": 500}, headers=auth_header()).json()
         assert lote["analyses"] == 500
         assert lote["estimated_seconds"] == pytest.approx(500 * 32, rel=0.05)
 
-        one = client.get(f"/analises/{queued.id}/estimativa").json()
+        one = client.get(f"/analises/{queued.id}/estimativa", headers=auth_header()).json()
         assert one["status"] == "PENDING"
         assert one["estimated_seconds_remaining"] >= 0
 
-        assert client.get(f"/analises/{uuid4()}/estimativa").status_code == 404
-        assert client.get("/estimativa", params={"analyses": 0}).status_code == 422
+        assert client.get(f"/analises/{uuid4()}/estimativa", headers=auth_header()).status_code == 404
+        assert client.get("/estimativa", params={"analyses": 0}, headers=auth_header()).status_code == 422
     finally:
         main.app.dependency_overrides.clear()
