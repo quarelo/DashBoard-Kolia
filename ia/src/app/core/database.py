@@ -1,4 +1,6 @@
-from sqlalchemy import create_engine, text
+from pathlib import Path
+
+from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from src.app.core.config import settings
@@ -20,25 +22,26 @@ def get_db():
 
 
 def init_database() -> None:
-    with engine.begin() as connection:
-        connection.execute(text("CREATE SCHEMA IF NOT EXISTS ai"))
-        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-    import src.app.models  # noqa: F401
-    Base.metadata.create_all(bind=engine)
-    with engine.begin() as connection:
-        connection.execute(text(
-            "ALTER TABLE ai.meeting_analyses ADD COLUMN IF NOT EXISTS "
-            "summary_attempt_started_at TIMESTAMP WITH TIME ZONE"
-        ))
-        connection.execute(text(
-            "ALTER TABLE ai.meeting_analyses ADD COLUMN IF NOT EXISTS "
-            "summary_attempt_started_chunks INTEGER NOT NULL DEFAULT 0"
-        ))
-        connection.execute(text(
-            "ALTER TABLE ai.meeting_analyses ADD COLUMN IF NOT EXISTS "
-            "summary_stage TEXT NOT NULL DEFAULT 'PRELIMINARY'"
-        ))
-        connection.execute(text(
-            "ALTER TABLE ai.meeting_analyses ADD COLUMN IF NOT EXISTS "
-            "summary_is_final BOOLEAN NOT NULL DEFAULT false"
-        ))
+    """Verify the schema is migrated; never create or alter it.
+
+    This used to run `create_all()` plus a block of `ALTER TABLE ... ADD COLUMN
+    IF NOT EXISTS` on every startup — DDL executed by the application itself, with
+    no record of what had been applied. Schema changes now live in `migrations/`;
+    this only refuses to start against a stale database.
+    """
+    from alembic.config import Config
+    from alembic.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    root = Path(__file__).resolve().parents[3]
+    script = ScriptDirectory.from_config(Config(str(root / "alembic.ini")))
+    with engine.connect() as connection:
+        current = MigrationContext.configure(
+            connection, opts={"version_table_schema": "ai"},
+        ).get_current_revision()
+    head = script.get_current_head()
+    if current != head:
+        raise RuntimeError(
+            f"Banco na revisão {current or 'nenhuma'}, esperado {head}. "
+            "Rode 'alembic upgrade head' em ia/ antes de subir o serviço."
+        )
