@@ -69,18 +69,33 @@ def all_meetings(client: httpx.Client) -> list[dict]:
             return meetings
 
 
-def wait_for(client: httpx.Client, meeting_id: str, timeout_seconds: float) -> str:
-    """Poll one analysis to a terminal state; returns the status it settled on."""
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
+def wait_for(client: httpx.Client, meeting_id: str, stall_seconds: float) -> str:
+    """Poll one analysis to a terminal state; returns the status it settled on.
+
+    Gives up on lack of progress, not on elapsed time. A total budget gets both
+    cases wrong: a healthy 21-chunk meeting takes ~20 minutes and was being marked
+    failed at 15, while a genuinely stuck one would still hold the batch for the
+    whole budget. Progress is chunks summarised plus embeddings written, so an
+    analysis that is still moving is never abandoned however long it takes.
+    """
+    last_progress = time.monotonic()
+    seen = None
+    while True:
         response = client.get(f"/api/meetings/{meeting_id}/analysis")
         if response.status_code != 200:
             return f"HTTP {response.status_code}"
-        status = response.json().get("status", "?")
+        body = response.json()
+        status = body.get("status", "?")
         if status in TERMINAL_OK or status in TERMINAL_BAD:
             return status
+        progress = (status,
+                    body.get("processed_chunks"),
+                    body.get("embedding_progress_percent"))
+        if progress != seen:
+            seen, last_progress = progress, time.monotonic()
+        elif time.monotonic() - last_progress > stall_seconds:
+            return "TRAVADA"
         time.sleep(POLL_SECONDS)
-    return "TIMEOUT"
 
 
 def main() -> None:
@@ -88,8 +103,10 @@ def main() -> None:
     parser.add_argument("--csv", required=True)
     parser.add_argument("--email", required=True)
     parser.add_argument("--backend", default="http://localhost:8080")
-    parser.add_argument("--timeout", type=float, default=900,
-                        help="Segundos de espera por análise antes de desistir dela.")
+    # A single 2000-token chunk takes about 70s on the reference host, so this is
+    # several chunks' worth of silence before calling an analysis stuck.
+    parser.add_argument("--stall", type=float, default=600, metavar="SEGUNDOS",
+                        help="Desiste de uma análise após este tempo SEM progresso.")
     parser.add_argument("--limit", type=int, default=None,
                         help="Processa só as N primeiras — use para um ensaio curto.")
     parser.add_argument("--skip-import", action="store_true")
@@ -121,7 +138,7 @@ def main() -> None:
                 log(f"[{index}/{len(pending)}] {meeting['external_id']}: envio falhou "
                     f"({response.status_code}) {response.text[:120]}")
                 continue
-            status = wait_for(client, meeting["id"], args.timeout)
+            status = wait_for(client, meeting["id"], args.stall)
             elapsed = time.monotonic() - began
             durations.append(elapsed)
             if status in TERMINAL_OK:
