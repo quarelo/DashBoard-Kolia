@@ -49,7 +49,7 @@ services:
       OLLAMA_THINK: ${OLLAMA_THINK:-True}
       OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-512}
       OLLAMA_CHUNK_THINK: ${OLLAMA_CHUNK_THINK:-false}
-      OLLAMA_CHUNK_NUM_PREDICT: ${OLLAMA_CHUNK_NUM_PREDICT:-192}
+      OLLAMA_CHUNK_NUM_PREDICT: ${OLLAMA_CHUNK_NUM_PREDICT:-256}
       OLLAMA_CONSOLIDATION_THINK: ${OLLAMA_CONSOLIDATION_THINK:-false}
       OLLAMA_CONSOLIDATION_NUM_PREDICT: ${OLLAMA_CONSOLIDATION_NUM_PREDICT:-384}
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
@@ -92,6 +92,9 @@ services:
       - ollama_data:/root/.ollama
     environment:
       OLLAMA_NUM_PARALLEL: 1
+      # Kept at 1: raising it to 2 to hold gemma3 and nomic-embed together
+      # measured 0.9s better, inside the noise, and on a 7.2 GB host that
+      # extra resident model is what pushes the machine into swap.
       OLLAMA_MAX_LOADED_MODELS: 1
       OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
       OLLAMA_FLASH_ATTENTION: 1
