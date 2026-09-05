@@ -1,6 +1,7 @@
 import logging
 import math
 import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from time import perf_counter
@@ -15,6 +16,7 @@ from src.app.schemas.analysis import AnalyzeRequest
 from src.app.services.chunk_service import (
     clean_chunk_text,
     clean_transcription,
+    rank_chunk_indices_for_partial,
     sanitize_transcription,
 )
 from src.app.services.llm_service import (
@@ -22,6 +24,11 @@ from src.app.services.llm_service import (
     complete_missing_fields,
     generate_chunk_summary,
     generate_embedding,
+)
+from src.app.services.motive_rules import churn_motives, opportunity_motives
+from src.app.services.scoring_service import (
+    calculate_churn_risk,
+    calculate_opportunity_score,
 )
 from src.app.services.token_service import count_tokens, split_text_by_tokens
 
@@ -425,13 +432,49 @@ def build_compact_final_summary(
         fact for fact in grouped["BUDGET"]
         if _FINANCIAL_VALUE_PATTERN.search(fact)
     ]
-    grouped["CHURN"] = [
-        fact for fact in grouped["CHURN"]
-        if _CHURN_SIGNAL_PATTERN.search(fact)
-        and not _NON_CHURN_CANCELLATION_PATTERN.search(fact)
+
+    # Calculate churn risk using deterministic scoring.
+    # Filter out non-churn cancellations (e.g., "Pedido cancelado") which are metrics,
+    # not actual churn signals.
+    raw_churn_facts = grouped["CHURN"]
+    filtered_churn_facts = [
+        fact for fact in raw_churn_facts
+        if not _NON_CHURN_CANCELLATION_PATTERN.search(fact)
     ]
+
+    # Codes the model declared under the enum-constrained schema are authoritative:
+    # they do not depend on how it worded the fact. Text inference stays only as a
+    # fallback for summaries produced before the schema carried motives.
+    declared_churn = [
+        code for summary in chunk_summaries
+        for code in (summary.get("motivos_churn") or [])
+    ]
+    # Rules read the evidence text the model quoted, which is transcript wording,
+    # rather than its paraphrase — and they refuse hypotheticals, so a prospect's
+    # "e se não der certo?" no longer scores as a customer about to leave.
+    all_churn_motives = declared_churn or [
+        code for fact in filtered_churn_facts for code in churn_motives(fact)
+    ]
+
+    churn_risk = calculate_churn_risk(all_churn_motives)
+
+    # Calculate opportunity score using deterministic scoring
     opportunities = _select_critical_facts(grouped["OPORTUNIDADE"], 3)
-    churn_signals = _select_critical_facts(grouped["CHURN"], 3)
+
+    declared_opportunity = [
+        code for summary in chunk_summaries
+        for code in (summary.get("motivos_oportunidade") or [])
+    ]
+    all_opportunity_motives = declared_opportunity or [
+        code for fact in opportunities for code in opportunity_motives(fact)
+    ]
+
+    opportunity_score = calculate_opportunity_score(all_opportunity_motives)
+
+    # For justifications, use the facts that contributed to the score
+    churn_signals = [fact for fact in filtered_churn_facts
+                     if churn_motives(fact)][:3]
+
     sentiment_facts = grouped["SENTIMENTO"]
     sentiment_text = " ".join(sentiment_facts).casefold()
     if any(word in sentiment_text for word in ("negativ", "insatisfeit", "frustr")):
@@ -470,12 +513,12 @@ def build_compact_final_summary(
             "justificativa": "; ".join(sentiment_facts[:3]) or "Não identificado nos trechos processados.",
         },
         "risco_churn": {
-            "score": min(100, 40 + 15 * len(churn_signals)) if churn_signals else 0,
+            "score": churn_risk.score,
             "justificativa": "; ".join(churn_signals) or "Nenhum sinal explícito identificado.",
         },
         "oportunidade_comercial": opportunities,
         "score_oportunidade": {
-            "score": min(100, 40 + 15 * len(opportunities)) if opportunities else 0,
+            "score": opportunity_score.score,
             "justificativa": "; ".join(opportunities) or "Nenhuma oportunidade explícita identificada.",
         },
         "budget": {
@@ -530,7 +573,12 @@ def build_single_chunk_final_summary(summary: dict) -> dict:
     return build_compact_final_summary([summary])
 
 
-def prepare_analysis(db: Session, payload: AnalyzeRequest) -> MeetingAnalysis:
+def prepare_analysis(
+    db: Session,
+    payload: AnalyzeRequest,
+    *,
+    on_created: Callable[[MeetingAnalysis], None] | None = None,
+) -> MeetingAnalysis:
     transcription = sanitize_transcription(payload.transcription)
     compacted_transcription = clean_transcription(transcription)
     logger.info(
@@ -556,8 +604,13 @@ def prepare_analysis(db: Session, payload: AnalyzeRequest) -> MeetingAnalysis:
     analysis.total_tokens = count_tokens(transcription)
     analysis.total_chunks = len(chunks)
     db.add(analysis)
-    db.commit()
-    db.refresh(analysis)
+    if on_created is None:
+        db.commit()
+        db.refresh(analysis)
+    else:
+        # Obtain the ID without publishing an analysis whose chunks and
+        # idempotency mapping have not yet been persisted.
+        db.flush()
 
     for index, content in enumerate(chunks, start=1):
         db.add(
@@ -571,6 +624,8 @@ def prepare_analysis(db: Session, payload: AnalyzeRequest) -> MeetingAnalysis:
                 clean_content=clean_chunk_text(content),
             )
         )
+    if on_created is not None:
+        on_created(analysis)
     db.commit()
     db.refresh(analysis)
     return analysis
@@ -607,6 +662,14 @@ def process_analysis_summaries(
 
         chunks = existing_chunks
         pending = [chunk for chunk in chunks if chunk.chunk_summary is None]
+        # Only the highest-signal chunks are worth an LLM call; the rest get the
+        # deterministic summary below. Without this cap every chunk was sent, so a
+        # 21-chunk transcription paid 21 generate calls instead of max_llm_chunks.
+        priority_indices = rank_chunk_indices_for_partial(
+            [chunk.clean_content or chunk.content for chunk in pending],
+            min(settings.max_llm_chunks, len(pending)),
+        )
+        pending = [pending[index] for index in priority_indices]
         chunks_by_index = {chunk.chunk_index: chunk for chunk in chunks}
         started_at = perf_counter()
         for chunk_index, summary in iter_pending_summaries(
