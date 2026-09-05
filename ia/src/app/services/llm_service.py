@@ -249,6 +249,15 @@ CHUNK_SUMMARY_SCHEMA = {
     "additionalProperties": False,
 }
 
+# Without the catalogue in the prompt the model has no idea what these fields
+# mean, so asking for them anyway only costs tokens and truncations.
+CHUNK_SUMMARY_SCHEMA_NO_MOTIVES = {
+    "type": "object",
+    "properties": {"pontos_chave": CHUNK_SUMMARY_SCHEMA["properties"]["pontos_chave"]},
+    "required": ["pontos_chave"],
+    "additionalProperties": False,
+}
+
 FINAL_LIST_SCHEMA = {
     "type": "array",
     "items": {"type": "string", "maxLength": 180},
@@ -504,9 +513,31 @@ def _generate_json(
     return parsed
 
 
+MOTIVE_CATALOGUE = """Além de pontos_chave, classifique o trecho nos catálogos abaixo, devolvendo
+apenas os códigos que o trecho sustenta. Listas vazias são a resposta correta
+quando não houver sinal; não force uma classificação.
+
+motivos_churn:
+  AMEACA_CANCELAMENTO    cliente fala em cancelar, encerrar ou rescindir
+  INSATISFACAO_EXPLICITA cliente demonstra insatisfação ou frustração
+  MENCAO_CONCORRENTE     cliente cita outro fornecedor ou alternativa
+  RECLAMACAO_PRODUTO     cliente relata falha, erro ou limitação do produto
+  INATIVIDADE_PROLONGADA cliente sem uso, sem compra ou sem retorno há tempo
+
+motivos_oportunidade:
+  PEDIDO_EXPANSAO        cliente pede ampliar contrato, licenças ou escopo
+  MENCAO_BUDGET          cliente cita orçamento, verba ou valor disponível
+  PRAZO_DEFINIDO         há data ou prazo concreto para decisão ou entrega
+  INTERESSE_NOVO_MODULO  cliente demonstra interesse em produto ainda não usado
+  ELOGIO_CLIENTE         cliente elogia produto, entrega ou atendimento
+
+"""
+
+
 def generate_chunk_summary(
     clean_content: str, *, client: httpx.Client | None = None
 ) -> dict[str, Any]:
+    motive_block = MOTIVE_CATALOGUE if settings.chunk_motive_classification else ""
     prompt = f"""Você é um especialista em análise de reuniões corporativas.
 Analise somente o trecho e retorne JSON apenas com pontos_chave. Diferencie
 claramente o que é uma demonstração hipotética do vendedor do que é uma
@@ -529,29 +560,12 @@ Preserve nomes, números e negações. Copie apenas ações explicitamente
 mencionadas; não crie novas ações. O trecho contém fatos relevantes: extraia pelo menos um
 deles. Não invente fatos.
 
-Além de pontos_chave, classifique o trecho nos catálogos abaixo, devolvendo
-apenas os códigos que o trecho sustenta. Listas vazias são a resposta correta
-quando não houver sinal; não force uma classificação.
-
-motivos_churn:
-  AMEACA_CANCELAMENTO    cliente fala em cancelar, encerrar ou rescindir
-  INSATISFACAO_EXPLICITA cliente demonstra insatisfação ou frustração
-  MENCAO_CONCORRENTE     cliente cita outro fornecedor ou alternativa
-  RECLAMACAO_PRODUTO     cliente relata falha, erro ou limitação do produto
-  INATIVIDADE_PROLONGADA cliente sem uso, sem compra ou sem retorno há tempo
-
-motivos_oportunidade:
-  PEDIDO_EXPANSAO        cliente pede ampliar contrato, licenças ou escopo
-  MENCAO_BUDGET          cliente cita orçamento, verba ou valor disponível
-  PRAZO_DEFINIDO         há data ou prazo concreto para decisão ou entrega
-  INTERESSE_NOVO_MODULO  cliente demonstra interesse em produto ainda não usado
-  ELOGIO_CLIENTE         cliente elogia produto, entrega ou atendimento
-
-TRECHO:
+{motive_block}TRECHO:
 {clean_content}"""
     summary = _generate_json(
         prompt,
-        CHUNK_SUMMARY_SCHEMA,
+        CHUNK_SUMMARY_SCHEMA if settings.chunk_motive_classification
+        else CHUNK_SUMMARY_SCHEMA_NO_MOTIVES,
         settings.ollama_chunk_think,
         settings.ollama_chunk_num_predict,
         settings.chunk_model,
