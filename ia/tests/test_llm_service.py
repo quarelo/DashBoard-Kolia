@@ -37,7 +37,10 @@ def test_generate_chunk_summary_uses_configured_model_and_decodes_json(monkeypat
         assert "não use a palavra" in payload["prompt"].lower()
         assert payload["format"]["type"] == "object"
         assert payload["format"]["additionalProperties"] is False
-        assert set(payload["format"]["properties"]) == {"pontos_chave"}
+        # Motive arrays are enum-constrained here, so scoring reads catalogue
+        # codes instead of matching however the model worded the fact.
+        assert set(payload["format"]["properties"]) == {
+            "pontos_chave", "motivos_churn", "motivos_oportunidade"}
         assert payload["format"]["properties"]["pontos_chave"]["minItems"] == 1
         assert payload["format"]["properties"]["pontos_chave"]["items"]["pattern"] == (
             "^(PRODUTO|PERSONA|SENTIMENTO|CHURN|OPORTUNIDADE|BUDGET|"
@@ -53,7 +56,7 @@ def test_generate_chunk_summary_uses_configured_model_and_decodes_json(monkeypat
 
     result = generate_chunk_summary("Integração com ERP", client=client_for(handler))
 
-    assert result == {"pontos_chave": ["EVIDÊNCIA: ERP"]}
+    assert result["pontos_chave"] == ["EVIDÊNCIA: ERP"]
 
 
 def test_consolidate_summaries_uses_its_own_thinking_budget(monkeypatch):
@@ -170,9 +173,9 @@ def test_generation_extracts_json_from_markdown_fence():
         )
     )
 
-    assert generate_chunk_summary("conteúdo", client=client) == {
-        "pontos_chave": ["EVIDÊNCIA: ok"]
-    }
+    assert generate_chunk_summary("conteúdo", client=client)["pontos_chave"] == [
+        "EVIDÊNCIA: ok"
+    ]
 
 
 def test_generation_repairs_invalid_json_once(monkeypatch):
@@ -191,7 +194,7 @@ def test_generation_repairs_invalid_json_once(monkeypatch):
 
     result = generate_chunk_summary("conteúdo", client=client_for(handler))
 
-    assert result == {"pontos_chave": ["EVIDÊNCIA: reparado"]}
+    assert result["pontos_chave"] == ["EVIDÊNCIA: reparado"]
     assert calls == 2
 
 
@@ -222,7 +225,7 @@ def test_generation_retries_truncated_output_with_larger_budget(monkeypatch):
 
     result = generate_chunk_summary("conteúdo", client=client_for(handler))
 
-    assert result == {"pontos_chave": ["AÇÃO: enviar proposta"]}
+    assert result["pontos_chave"] == ["AÇÃO: enviar proposta"]
     assert calls == [192, 384]
 
 
@@ -246,17 +249,15 @@ def test_chunk_summary_normalizes_and_preserves_commercial_categories():
 
     result = generate_chunk_summary("conteúdo", client=client)
 
-    assert result == {
-        "pontos_chave": [
-            "AÇÃO: enviar proposta",
-            "DÚVIDA: qual é o prazo?",
-            "BUDGET: R$ 40 mil",
-            "PRODUTO: TOTVS CRM",
-                "OPORTUNIDADE: ampliar licenças",
-                "GAP: integração ausente",
-                "FEEDBACK: item excedente",
-            ]
-        }
+    assert result["pontos_chave"] == [
+        "AÇÃO: enviar proposta",
+        "DÚVIDA: qual é o prazo?",
+        "BUDGET: R$ 40 mil",
+        "PRODUTO: TOTVS CRM",
+        "OPORTUNIDADE: ampliar licenças",
+        "GAP: integração ausente",
+        "FEEDBACK: item excedente",
+    ]
 
 
 def test_chunk_summary_salvages_only_complete_items_from_truncated_json(
@@ -277,14 +278,12 @@ def test_chunk_summary_salvages_only_complete_items_from_truncated_json(
 
     result = generate_chunk_summary("conteúdo", client=client)
 
-    assert result == {
-        "pontos_chave": [
-            "AÇÃO: enviar proposta",
-                "BUDGET: R$ 40 mil",
-                "PRODUTO: TOTVS CRM",
-            "PROBLEMA: integração ausente",
-        ]
-    }
+    assert result["pontos_chave"] == [
+        "AÇÃO: enviar proposta",
+        "BUDGET: R$ 40 mil",
+        "PRODUTO: TOTVS CRM",
+        "PROBLEMA: integração ausente",
+    ]
 
 
 def test_chunk_summary_preserves_explicit_quantity_and_dated_commitment():
@@ -413,7 +412,7 @@ def test_generation_retries_one_read_timeout(monkeypatch):
 
     result = generate_chunk_summary("conteúdo", client=client_for(handler))
 
-    assert result == {"pontos_chave": ["EVIDÊNCIA: ok"]}
+    assert result["pontos_chave"] == ["EVIDÊNCIA: ok"]
     assert attempts == 2
 
 

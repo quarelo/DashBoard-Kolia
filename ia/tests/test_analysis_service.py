@@ -441,7 +441,13 @@ def test_pending_summaries_rejects_concurrency_above_two():
         raise AssertionError("concorrência maior que dois deve ser rejeitada")
 
 
-def test_summary_worker_sends_every_chunk_to_ollama_even_with_legacy_limit(monkeypatch):
+def test_summary_worker_honours_max_llm_chunks(monkeypatch):
+    """MAX_LLM_CHUNKS caps how many chunks reach the LLM.
+
+    The knob existed but nothing read it, so every chunk was sent and the
+    handoff's 'ajustar MAX_LLM_CHUNKS conforme CPU' could not be acted on.
+    Chunks left over still get the deterministic summary, so no chunk is lost.
+    """
     analysis_id = uuid4()
     analysis = MeetingAnalysis(
         id=analysis_id,
@@ -489,7 +495,10 @@ def test_summary_worker_sends_every_chunk_to_ollama_even_with_legacy_limit(monke
     result = analysis_service.process_analysis_summaries(db=session, analysis_id=analysis_id)
 
     assert result.status == "DASHBOARD_READY"
-    assert calls == ["primeiro", "segundo"]
+    # Only the ranked first chunk goes to the model; the other is summarised
+    # deterministically rather than skipped.
+    assert calls == ["primeiro"]
+    assert all(chunk.chunk_summary is not None for chunk in chunks)
 
 
 def test_single_compact_chunk_preserves_key_points_as_evidence():
@@ -566,7 +575,11 @@ def test_compact_summary_does_not_turn_neutral_insights_into_churn_or_budget():
         ]
     }])
 
-    assert result["risco_churn"]["score"] == 55
+    # Changed from 55 to 50: now using deterministic motive-based scoring.
+    # "Cliente ameaçou cancelar" infers AMEACA_CANCELAMENTO motive = 50 points.
+    # Previously scored as: 40 (base) + 15 * count = 40 + 15*1 = 55.
+    # Neutral insights ("Avaliar desempenho", "Perder oportunidades") are still filtered out.
+    assert result["risco_churn"]["score"] == 50
     assert result["risco_churn"]["justificativa"] == (
         "Cliente ameaçou cancelar o contrato"
     )
