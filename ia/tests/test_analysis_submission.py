@@ -200,7 +200,12 @@ def test_analisar_header_deduplicates_and_rejects_payload_conflict(sessions, pay
     main.app.dependency_overrides[get_db] = get_test_db
     client = TestClient(main.app)
     try:
-        headers = {"Idempotency-Key": "f" * 64}
+        # /analisar now requires a backend-issued token alongside the key.
+        import jwt
+        from src.app.core.config import settings
+        auth = "Bearer " + jwt.encode({"sub": "test@kolia.com"},
+                                      settings.secret_key, algorithm=settings.algorithm)
+        headers = {"Idempotency-Key": "f" * 64, "Authorization": auth}
         first = client.post("/analisar", headers=headers, json=payload.model_dump(mode="json"))
         with sessions() as db:
             chunk = db.scalar(select(MeetingChunk))
@@ -209,7 +214,7 @@ def test_analisar_header_deduplicates_and_rejects_payload_conflict(sessions, pay
         second = client.post("/analisar", headers=headers, json=payload.model_dump(mode="json"))
         changed = payload.model_copy(update={"title": "Alterada"})
         conflict = client.post("/analisar", headers=headers, json=changed.model_dump(mode="json"))
-        invalid = client.post("/analisar", headers={"Idempotency-Key": "invalid"},
+        invalid = client.post("/analisar", headers={"Idempotency-Key": "invalid", "Authorization": auth},
                               json=payload.model_dump(mode="json"))
     finally:
         main.app.dependency_overrides.clear()
