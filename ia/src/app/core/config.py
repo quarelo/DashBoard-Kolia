@@ -19,7 +19,17 @@ class Settings(BaseSettings):
     ollama_think: bool = True
     ollama_num_predict: int = 512
     ollama_chunk_think: bool = False
-    ollama_chunk_num_predict: int = 192
+    # 192 was cheaper per call but truncated often, and a truncated JSON costs a
+    # full retry at double the budget: measured over 10 real meetings, 192 spent
+    # 140s with 3 retries against 97s and none at 256. Asking for more up front
+    # is the cheaper trade here.
+    ollama_chunk_num_predict: int = 256
+    # On, and not only for the codes: measured over 14 real meetings, dropping the
+    # catalogue was 2.3x SLOWER (301s against 132s, 8 truncations against none).
+    # The block seems to anchor the answer — without it the model rambles in
+    # pontos_chave and overruns the budget, and each overrun costs a full retry.
+    # The 1B still returns no usable codes, so scoring runs on motive_rules.py.
+    chunk_motive_classification: bool = True
     ollama_consolidation_think: bool = False
     ollama_consolidation_num_predict: int = 384
     ollama_keep_alive: str = "30m"
