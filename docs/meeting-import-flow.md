@@ -154,6 +154,22 @@ retornando 409 `DUPLICATE_IMPORT`.
 uma reunião. Não há remoção nem sobrescrita de versões antigas: a limpeza de
 versões antigas, se desejada, é uma política à parte ainda não definida.
 
+## Busca e recuperação
+
+Cada bloco de ~2000 tokens é fatiado em passagens de ~400 (`ai.chunk_passages`),
+embeddadas individualmente. O bloco existe para resumir com poucas chamadas ao
+LLM; a passagem existe para buscar. Medido: um vetor sobre o bloco inteiro não
+trazia nenhuma das sete passagens que citam `R$` ao ser perguntado por valores.
+
+A busca roda por dois caminhos e funde por posição. O vetorial casa por assunto;
+o textual (`tsvector` em português, índice GIN) casa por palavra. Os termos da
+pergunta que aparecem em mais de 35% das passagens daquela análise são
+descartados — medido contra o próprio corpus, não contra uma lista escrita à mão,
+porque uma palavra genérica numa reunião pode ser o assunto central de outra.
+
+Análises indexadas antes das passagens continuam respondendo pelo vetor do bloco;
+o caminho antigo é o fallback. Reindexar não chama o LLM: são só os embeddings.
+
 ## Persistência e retomada
 
 `core.meeting_imports` armazena hashes/contagens. `core.meetings` guarda origem,

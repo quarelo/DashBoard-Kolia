@@ -12,34 +12,77 @@ Swagger e comandos de teste. O frontend ainda usa fixtures.
 
 ## Arquitetura
 
-```text
-Navegador
-   │
-   ▼
-Frontend React/Vite :5173
-   │
-   ▼
-Backend FastAPI :8080
+Dois serviços dividem um PostgreSQL, e a fronteira entre eles é o schema: nenhum
+escreve na tabela do outro.
 
-Serviço de IA FastAPI :3000
-   │              │
-   ▼              ▼
-Ollama :11434   PostgreSQL + pgvector :5433
+```text
+                        Navegador
+                            │
+                            ▼
+   Frontend React/Vite :5173      (ainda lê fixtures locais)
+                            │
+                            ▼
+   ┌──────────────────────┐   token de serviço    ┌──────────────────────┐
+   │  Backend FastAPI     │ ────────────────────▶ │  Serviço de IA       │
+   │  :8080 · schema core │                       │  :3000 · schema ai   │
+   │                      │                       │                      │
+   │  login e JWT         │                       │  fatia em chunks     │
+   │  importa CSV/JSON    │                       │  resume com o LLM    │
+   │  versiona reuniões   │                       │  gera embeddings     │
+   │  despacha análise    │                       │  busca híbrida e chat│
+   └──────────┬───────────┘                       └─────┬──────────┬─────┘
+              │                                         │          │
+              │                                         │          ▼
+              │                                         │   Ollama :11434
+              ▼                                         ▼
+   ┌────────────────────────────────────────────────────────────────────┐
+   │            PostgreSQL 16 + pgvector  ·  porta 5433                 │
+   │                                                                    │
+   │  core.users            ai.meeting_analyses    ai.chunk_passages    │
+   │  core.meeting_imports  ai.meeting_chunks      ai.analysis_submis…  │
+   └────────────────────────────────────────────────────────────────────┘
 ```
 
-Os componentes têm responsabilidades separadas:
+### O caminho de uma reunião
 
-- `frontend`: interface React, TypeScript, Vite e Tailwind CSS.
-- `backend`: API FastAPI de autenticação, usuários e JWT.
-- `ia-service`: processamento de transcrições, resumos, embeddings, busca
-  semântica e chatbot RAG.
+1. **Importar** — CSV ou JSON pelo backend, com deduplicação por hash do arquivo
+   e do conteúdo. Importar nunca dispara análise.
+2. **Analisar** — chamada explícita por reunião. O backend resolve a transcrição
+   salva, deriva uma chave de idempotência do UUID interno mais o hash do texto, e
+   despacha. Clique repetido ou timeout reaproveitam a mesma análise.
+3. **Resumir** — a IA fatia em blocos de ~2000 tokens, manda os de maior sinal ao
+   LLM e consolida no contrato de 13 campos do dashboard.
+4. **Indexar** — cada bloco é dividido em passagens de ~400 tokens, embeddadas
+   individualmente no pgvector.
+5. **Consultar** — busca e chat, isolados por análise, só depois que todos os
+   embeddings existem.
+
+### Decisões que explicam o desenho
+
+- **Dois tamanhos de texto.** O bloco de ~2000 tokens existe para resumir com
+  poucas chamadas ao LLM; a passagem de ~400 existe para buscar. Um vetor médio
+  sobre duas mil palavras dissolve a frase que cita um preço — perguntar por
+  valores devolvia cinco trechos sem nenhum `R$`.
+- **Busca híbrida.** Vetorial acha o assunto e perde o fato específico; textual
+  acha a palavra e perde o contexto. As duas rodam e os resultados são fundidos
+  por posição (*reciprocal rank fusion*), então nenhuma precisa acertar sozinha.
+- **Churn e oportunidade são aritmética.** Um catálogo fixo de motivos com pontos
+  definidos pelo negócio, somados e limitados em 100. A camada de cálculo é pura e
+  determinística: a mesma combinação sempre gera o mesmo score.
+- **Reprocessar cria versão.** Transcrição corrigida vira uma nova versão da
+  reunião, com análise própria. A anterior mantém seus chunks e citações.
+- **O app não cria schema.** No startup ele confere a revisão do Alembic e recusa
+  subir se estiver defasada. Cada serviço tem suas migrações e sua tabela de
+  versão, no seu schema.
+
+Os componentes:
+
+- `frontend`: interface React, TypeScript, Vite e Tailwind CSS. **Ainda lê os JSON
+  de exemplo em `src/data/`; não consome as APIs abaixo.**
+- `backend`: autenticação, importação, versionamento e despacho de análise.
+- `ia-service`: chunking, resumo, embeddings, busca híbrida e chat.
 - `ollama`: inferência local dos modelos de geração e embedding.
-- `postgres`: PostgreSQL 16 com pgvector. Armazena usuários, análises, chunks,
-  resumos e vetores.
-
-O frontend atual ainda contém dados simulados em alguns fluxos. A API de IA já
-oferece resumo e chat por reunião, mas a integração completa deve passar pelo
-backend antes do uso em produção.
+- `postgres`: PostgreSQL 16 com pgvector, com os schemas `core` e `ai`.
 
 ## Requisitos
 
