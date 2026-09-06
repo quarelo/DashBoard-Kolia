@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from src.app.models.analysis import MeetingAnalysis, MeetingChunk
+from src.app.models.analysis import ChunkPassage, MeetingAnalysis, MeetingChunk
 from src.app.services.llm_service import generate_embedding
 
 
@@ -169,6 +169,116 @@ _GROUP_QUERIES = {
 }
 
 
+# Fusion constant: with k=60 the top of each list dominates without a single
+# method being able to shut the other out. It is the value the RRF paper uses and
+# the one every implementation defaults to; nothing here depends on it being exact.
+RRF_K = 60
+# A term in more than this share of an analysis's passages does not tell the
+# search which one answers; below this many passages the share is meaningless.
+_MAX_TERM_SHARE = 0.35
+_MIN_PASSAGES_FOR_IDF = 12
+
+
+def _lexical_query(db: Session, analysis_id: UUID, query: str) -> str:
+    """OR of the query terms that actually discriminate, judged by this analysis.
+
+    OR because a question is not a phrase to match: `plainto_tsquery` ANDs the
+    terms, and "prazo data sexta entrega" then matched nothing at all.
+
+    Discriminating, because OR alone is worse than useless: "O que falaram sobre
+    boleto?" became `boleto | sobre | falaram`, which matched 79 passages, and
+    ts_rank ranks by term frequency — the two passages that really discuss boleto
+    sank under passages repeating "falaram". Terms carried by most of the corpus
+    say nothing about which passage answers.
+
+    The cut is measured against the analysis being searched, not a written list of
+    stop words: a word that is generic here may be the whole point elsewhere, and
+    a hand-kept vocabulary is exactly what this search is meant to avoid.
+    """
+    terms = [t for t in _excerpt_terms(query) if len(t) > 2]
+    if not terms:
+        return ""
+    total = db.execute(
+        select(func.count(ChunkPassage.id))
+        .where(ChunkPassage.analysis_id == analysis_id)
+    ).scalar_one() or 0
+    if total < _MIN_PASSAGES_FOR_IDF:
+        return " | ".join(terms)
+
+    discriminating = []
+    for term in terms:
+        matches = db.execute(
+            select(func.count(ChunkPassage.id)).where(
+                ChunkPassage.analysis_id == analysis_id,
+                ChunkPassage.search_vector.op("@@")(
+                    func.to_tsquery("portuguese", term)),
+            )
+        ).scalar_one()
+        if matches and matches <= total * _MAX_TERM_SHARE:
+            discriminating.append(term)
+    # Everything the person asked is common here; better a broad match than none.
+    return " | ".join(discriminating or terms)
+
+
+def _fuse(vector_ids: list, lexical_ids: list) -> dict:
+    """Reciprocal rank fusion: score each id by its position in each list.
+
+    The two methods fail differently — vector search finds the topic and loses the
+    specific fact, lexical search finds the word and loses the context — so a
+    passage ranked well by either one deserves to be considered. Fusing by rank
+    rather than by score avoids comparing a cosine distance to a ts_rank, which
+    are not on the same scale and never will be.
+    """
+    scores: dict = {}
+    for ranking in (vector_ids, lexical_ids):
+        for position, identifier in enumerate(ranking, start=1):
+            scores[identifier] = scores.get(identifier, 0.0) + 1.0 / (RRF_K + position)
+    return scores
+
+
+def _passage_search(db: Session, analysis_id: UUID, query: str,
+                    query_embedding: list, top_k: int) -> list:
+    """Candidates from both methods, merged by rank."""
+    distance = ChunkPassage.embedding.cosine_distance(query_embedding)
+    # Deeper than top_k on each side: fusion only helps if it has something to
+    # merge, and the passage that answers is often mid-list on one of them.
+    depth = max(top_k * 4, 20)
+    vector_rows = db.execute(
+        select(ChunkPassage, MeetingChunk.chunk_index, distance.label("distance"))
+        .join(MeetingChunk, MeetingChunk.id == ChunkPassage.chunk_id)
+        .where(ChunkPassage.analysis_id == analysis_id,
+               ChunkPassage.embedding.is_not(None))
+        .order_by(distance.asc()).limit(depth)
+    ).all()
+
+    lexical_rows = []
+    tsquery = _lexical_query(db, analysis_id, query)
+    if tsquery:
+        rank = func.ts_rank(ChunkPassage.search_vector,
+                            func.to_tsquery("portuguese", tsquery))
+        lexical_rows = db.execute(
+            select(ChunkPassage, MeetingChunk.chunk_index, rank.label("rank"))
+            .join(MeetingChunk, MeetingChunk.id == ChunkPassage.chunk_id)
+            .where(ChunkPassage.analysis_id == analysis_id,
+                   ChunkPassage.search_vector.op("@@")(
+                       func.to_tsquery("portuguese", tsquery)))
+            .order_by(rank.desc()).limit(depth)
+        ).all()
+
+    by_id = {}
+    similarity = {}
+    for passage, chunk_index, cosine_distance in vector_rows:
+        by_id[passage.id] = (passage, chunk_index)
+        similarity[passage.id] = max(0.0, min(1.0, 1.0 - float(cosine_distance)))
+    for passage, chunk_index, _rank in lexical_rows:
+        by_id.setdefault(passage.id, (passage, chunk_index))
+
+    scores = _fuse([p.id for p, _c, _d in vector_rows],
+                   [p.id for p, _c, _r in lexical_rows])
+    ordered = sorted(scores, key=lambda pid: scores[pid], reverse=True)[:top_k]
+    return [(by_id[pid][0], by_id[pid][1], similarity.get(pid, 0.0)) for pid in ordered]
+
+
 def search_analysis_chunks(
     db: Session,
     analysis_id: UUID,
@@ -192,6 +302,26 @@ def search_analysis_chunks(
         )
 
     query_embedding = generate_embedding(query)
+    results = []
+
+    # Passages first: a vector over ~400 tokens can point at the sentence that
+    # names a price, where one vector averaged over a whole 2000-token chunk
+    # cannot — asking about values used to return five chunks above the threshold
+    # and none of the four that mention R$.
+    for passage, chunk_index, similarity in _passage_search(
+            db, analysis_id, query, query_embedding, top_k):
+        results.append({
+            "chunk_id": passage.chunk_id,
+            "chunk_index": chunk_index,
+            "excerpt": extract_relevant_excerpt(passage.content, query, excerpt_chars),
+            "similarity": round(similarity, 4),
+        })
+
+    if results:
+        return {"analysis_id": analysis_id, "query": query, "ready": True,
+                "results": results}
+
+    # Analyses indexed before passages existed still answer from chunk vectors.
     distance = MeetingChunk.embedding.cosine_distance(query_embedding)
     statement = (
         select(MeetingChunk, distance.label("distance"))
@@ -202,7 +332,6 @@ def search_analysis_chunks(
         .order_by(distance.asc())
         .limit(top_k)
     )
-    results = []
     for chunk, cosine_distance in db.execute(statement).all():
         similarity = max(0.0, min(1.0, 1.0 - float(cosine_distance)))
         content = chunk.clean_content or chunk.content
