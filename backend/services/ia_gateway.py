@@ -1,15 +1,36 @@
 import hashlib
 import re
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import httpx
+import jwt
 from fastapi import HTTPException
 
 from core.config import settings
 
 
+# The IA verifies every analysis route with the shared secret, so the backend has
+# to authenticate as a service rather than forward whoever is logged in: the worker
+# and retry paths run without a request context, and a user token would expire
+# mid-batch. Minutes, not days, because this token never leaves the internal call.
+SERVICE_TOKEN_MINUTES = 10
+
+
+def service_token() -> str:
+    return jwt.encode(
+        {"sub": "kolia-backend", "role": "SERVICE",
+         "exp": datetime.now(timezone.utc) + timedelta(minutes=SERVICE_TOKEN_MINUTES)},
+        settings.secret_key, algorithm=settings.algorithm,
+    )
+
+
 def get_ia_client():
-    with httpx.Client(base_url=settings.ia_service_url, timeout=httpx.Timeout(30, connect=5)) as client:
+    with httpx.Client(
+        base_url=settings.ia_service_url,
+        timeout=httpx.Timeout(30, connect=5),
+        headers={"Authorization": f"Bearer {service_token()}"},
+    ) as client:
         yield client
 
 
@@ -28,6 +49,15 @@ def request_ia(client: httpx.Client, method: str, path: str, **kwargs) -> dict:
         response = client.request(method, path, **kwargs)
         if response.status_code == 409:
             raise HTTPException(409, {"code": "ANALYSIS_NOT_READY", "message": "Análise em andamento ou indisponível para repetição."})
+        # A rejected token is a configuration fault, not an outage, and calling it
+        # "indisponível" sends whoever is on call to restart a healthy service.
+        # Both sides must sign with the same secret; retrying will not fix it.
+        if response.status_code in (401, 403):
+            raise HTTPException(502, {
+                "code": "IA_AUTH_FAILED",
+                "message": "A IA recusou a autenticação do backend. Verifique se os "
+                           "dois serviços leem o mesmo JWT_SECRET.",
+            })
         response.raise_for_status()
         result = response.json()
         if not isinstance(result, dict):
