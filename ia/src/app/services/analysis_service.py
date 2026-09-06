@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.app.core.config import settings
-from src.app.models.analysis import MeetingAnalysis, MeetingChunk
+from src.app.models.analysis import ChunkPassage, MeetingAnalysis, MeetingChunk
 from src.app.schemas.analysis import AnalyzeRequest
 from src.app.services.chunk_service import (
     clean_chunk_text,
@@ -31,6 +31,18 @@ from src.app.services.scoring_service import (
     calculate_opportunity_score,
 )
 from src.app.services.token_service import count_tokens, split_text_by_tokens
+
+
+def iter_passages(text: str):
+    """Slice a chunk into pieces small enough for retrieval to point at.
+
+    The overlap keeps a sentence that straddles a boundary retrievable from either
+    side. A chunk shorter than the passage size yields itself, so a one-chunk CSV
+    meeting gets exactly one passage and pays nothing extra.
+    """
+    if count_tokens(text) <= settings.passage_tokens:
+        return [text]
+    return split_text_by_tokens(text, settings.passage_tokens, settings.passage_overlap_tokens)
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -419,6 +431,22 @@ def _extract_source_facts(source_texts: list[str]) -> dict[str, list[str]]:
     return facts
 
 
+def _score_reason(score: int, signals: list[str], motives: list[str],
+                  empty: str) -> str:
+    """The sentence a score has to be able to point at.
+
+    A score with no reason, or a reason next to a zero, reads as a contradiction
+    on the dashboard — and both happened: churn 30 beside "nenhum sinal
+    identificado" when the codes came from the model, and an opportunity list
+    beside a zero once the rules stopped agreeing with it.
+    """
+    if not score:
+        return empty
+    if signals:
+        return "; ".join(signals)
+    return "; ".join(MOTIVE_LABELS.get(code, code) for code in dict.fromkeys(motives))
+
+
 def build_compact_final_summary(
     chunk_summaries: list[dict], source_texts: list[str] | None = None
 ) -> dict:
@@ -479,7 +507,7 @@ def build_compact_final_summary(
     declared_churn = [
         code for summary in chunk_summaries
         for code in (summary.get("motivos_churn") or [])
-    ]
+    ] if settings.trust_declared_motives else []
     # Rules read the evidence text the model quoted, which is transcript wording,
     # rather than its paraphrase — and they refuse hypotheticals, so a prospect's
     # "e se não der certo?" no longer scores as a customer about to leave.
@@ -495,7 +523,7 @@ def build_compact_final_summary(
     declared_opportunity = [
         code for summary in chunk_summaries
         for code in (summary.get("motivos_oportunidade") or [])
-    ]
+    ] if settings.trust_declared_motives else []
     all_opportunity_motives = declared_opportunity or [
         code for fact in opportunities for code in opportunity_motives(fact)
     ]
@@ -507,6 +535,8 @@ def build_compact_final_summary(
     # identificado" whenever the codes came from the model instead of the rules.
     churn_signals = [fact for fact in filtered_churn_facts
                      if churn_motives(fact)][:3]
+    opportunity_signals = [fact for fact in opportunities
+                           if opportunity_motives(fact)][:3]
     if all_churn_motives and not churn_signals:
         churn_signals = [MOTIVE_LABELS.get(code, code) for code in all_churn_motives[:3]]
 
@@ -561,12 +591,19 @@ def build_compact_final_summary(
         },
         "risco_churn": {
             "score": churn_risk.score,
-            "justificativa": "; ".join(churn_signals) or "Nenhum sinal explícito identificado.",
+            "justificativa": _score_reason(
+                churn_risk.score, churn_signals, all_churn_motives,
+                "Nenhum sinal explícito identificado."),
         },
         "oportunidade_comercial": opportunities,
         "score_oportunidade": {
             "score": opportunity_score.score,
-            "justificativa": "; ".join(opportunities) or "Nenhuma oportunidade explícita identificada.",
+            # Same rule as churn: the sentence has to come from whatever produced
+            # the number. Listing opportunity facts next to a zero read as an
+            # opportunity nobody scored, which is a contradiction on the card.
+            "justificativa": _score_reason(
+                opportunity_score.score, opportunity_signals, all_opportunity_motives,
+                "Nenhuma oportunidade explícita identificada."),
         },
         "budget": {
             "identificado": bool(source_budget or budget_facts),
@@ -810,14 +847,33 @@ def process_analysis_embeddings(
         db.refresh(analysis)
 
         for chunk in _analysis_chunks(db, analysis.id):
-            if chunk.embedding is not None:
+            if chunk.embedding is not None and chunk.passages:
                 continue
             started_at = perf_counter()
-            chunk.embedding = generate_embedding(chunk.clean_content or chunk.content)
+            text = chunk.clean_content or chunk.content
+            # The chunk vector stays: it is what an existing analysis was indexed
+            # with, and coarse retrieval still falls back to it.
+            if chunk.embedding is None:
+                chunk.embedding = generate_embedding(text)
+            if not chunk.passages:
+                for index, passage in enumerate(iter_passages(text), start=1):
+                    # A chunk short enough to be a single passage is the same text
+                    # twice; embedding it again would double the cost of every
+                    # one-chunk meeting, which is all 500 in the CSV.
+                    vector = (chunk.embedding if passage == text
+                              else generate_embedding(passage))
+                    chunk.passages.append(ChunkPassage(
+                        analysis_id=analysis.id,
+                        passage_index=index,
+                        content=passage,
+                        token_count=count_tokens(passage),
+                        embedding=vector,
+                    ))
             logger.info(
-                "analysis_id=%s chunk=%d embedding_seconds=%.3f",
+                "analysis_id=%s chunk=%d passages=%d embedding_seconds=%.3f",
                 analysis.id,
                 chunk.chunk_index,
+                len(chunk.passages),
                 perf_counter() - started_at,
             )
             db.commit()

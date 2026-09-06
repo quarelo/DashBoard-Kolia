@@ -11,11 +11,32 @@ payload = {
     )
 }
 
+
+
+def _auth_header() -> dict:
+    """/analisar requires a backend-issued token; sign one with the shared secret."""
+    import sys
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import jwt
+    from src.app.core.config import settings
+
+    token = jwt.encode(
+        {"sub": "test@kolia.com",
+         "exp": datetime.now(timezone.utc) + timedelta(minutes=30)},
+        settings.secret_key, algorithm=settings.algorithm,
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
 try:
     response = requests.post(
         URL,
         json=payload,
-    )   
+        headers=_auth_header(),
+    )
 
     print(f"Status: {response.status_code}")
 
