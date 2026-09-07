@@ -1,4 +1,5 @@
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
 import {
   ArrowRight, CheckCircle2, ChevronRight, Star,
   FileText, Brain, Sparkles, BarChart3,
@@ -142,7 +143,8 @@ function DashboardPreview() {
 /* ─── component ─────────────────────────────────────────────── */
 export function Landing() {
   const navigate = useNavigate();
-  const goDash = () => navigate("/app/dashboard");
+  const { user } = useAuth();
+  const goDash = () => navigate(user ? "/app/dashboard" : "/login");
 
   return (
     <div className="min-h-screen bg-white font-sans text-ink overflow-x-hidden">

@@ -19,3 +19,12 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     expires_in_days: int
+
+
+class UserOut(BaseModel):
+    id: int
+    name: str
+    email: EmailStr
+    role: RoleEnum
+
+    model_config = {"from_attributes": True}
