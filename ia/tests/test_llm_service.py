@@ -472,3 +472,30 @@ def test_schema_drops_motives_when_classification_is_disabled(monkeypatch):
 
     assert seen["properties"] == {"pontos_chave"}
     assert "AMEACA_CANCELAMENTO" not in seen["prompt"]
+
+
+def test_chunk_budget_scales_with_the_chunk():
+    """One fixed budget cannot serve both sizes.
+
+    A truncated answer costs the whole call again at double the budget. Measured on
+    real chunks: a ~33-token CSV meeting is fastest at 256 and slower above it,
+    while a 2000-token chunk truncated on 6 of 6 calls at 256 against 1 of 6 at 512
+    — 132s versus 227s for the same six chunks.
+    """
+    from src.app.services.llm_service import chunk_num_predict
+
+    pequeno = chunk_num_predict("locutor_1 qual preço locutor_2 quinze mil por mês")
+    medio = chunk_num_predict("palavra " * 1600)
+    enorme = chunk_num_predict("palavra " * 8000)
+
+    assert pequeno == settings.ollama_chunk_num_predict, "piso para chunk minúsculo"
+    assert enorme == settings.ollama_chunk_num_predict_max, "teto para chunk enorme"
+    assert pequeno < medio < enorme, "cresce com a entrada entre o piso e o teto"
+
+
+def test_chunk_budget_never_leaves_the_configured_window():
+    from src.app.services.llm_service import chunk_num_predict
+
+    for texto in ("", "a", "palavra " * 500, "palavra " * 50_000):
+        budget = chunk_num_predict(texto)
+        assert settings.ollama_chunk_num_predict <= budget <= settings.ollama_chunk_num_predict_max

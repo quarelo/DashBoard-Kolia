@@ -109,6 +109,11 @@ def main() -> None:
                         help="Desiste de uma análise após este tempo SEM progresso.")
     parser.add_argument("--limit", type=int, default=None,
                         help="Processa só as N primeiras — use para um ensaio curto.")
+    # A batch that fails from the first meeting is a broken service or a bad
+    # secret, not bad luck: without this it would spend hours logging the same
+    # error 500 times, each one waiting out the stall window.
+    parser.add_argument("--abort-after", type=int, default=5, metavar="N",
+                        help="Aborta após N falhas consecutivas.")
     parser.add_argument("--skip-import", action="store_true")
     args = parser.parse_args()
 
@@ -127,7 +132,7 @@ def main() -> None:
         if args.limit:
             pending = pending[:args.limit]
 
-        done = failed = 0
+        done = failed = streak = 0
         durations: list[float] = []
         started = time.monotonic()
         for index, meeting in enumerate(pending, start=1):
@@ -135,19 +140,33 @@ def main() -> None:
             response = client.post(f"/api/meetings/{meeting['id']}/analysis")
             if response.status_code not in (200, 202):
                 failed += 1
+                streak += 1
                 log(f"[{index}/{len(pending)}] {meeting['external_id']}: envio falhou "
-                    f"({response.status_code}) {response.text[:120]}")
+                    f"({response.status_code}) {response.text[:160]}")
+                if streak >= args.abort_after:
+                    log(f"Abortado: {streak} falhas seguidas. Nada foi processado "
+                        "desde então; corrija a causa e rode de novo — as concluídas "
+                        "são ignoradas.")
+                    break
                 continue
             status = wait_for(client, meeting["id"], args.stall)
             elapsed = time.monotonic() - began
-            durations.append(elapsed)
             if status in TERMINAL_OK:
                 done += 1
+                streak = 0
+                # Only successful runs shape the ETA: a stalled one contributes the
+                # whole --stall window and would push the estimate up for the rest
+                # of the batch, which is the opposite of what it is for.
+                durations.append(elapsed)
             else:
                 failed += 1
-            # Median beats mean here: one stuck analysis should not distort the ETA.
+                streak += 1
+                if streak >= args.abort_after:
+                    log(f"Abortado: {streak} análises seguidas terminaram em falha. "
+                        "Corrija a causa e rode de novo.")
+                    break
             ordered = sorted(durations)
-            median = ordered[len(ordered) // 2]
+            median = ordered[len(ordered) // 2] if ordered else elapsed
             remaining = timedelta(seconds=int(median * (len(pending) - index)))
             log(f"[{index}/{len(pending)}] {meeting['external_id']}: {status} "
                 f"em {elapsed:.0f}s | ok={done} falhas={failed} | restam ~{remaining}")

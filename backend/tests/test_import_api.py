@@ -1,6 +1,7 @@
 import json
 import csv
 import io
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -319,3 +320,74 @@ def test_identifier_too_large_is_a_validation_error_not_database_error(client):
     response = upload(client, csv_bytes((oversized_id,)))
     assert response.status_code == 422
     assert client.get("/api/meetings").json()["total"] == 0
+
+
+def test_backend_authenticates_itself_against_the_ia(client, monkeypatch):
+    """The IA requires a token on every analysis route, and the backend is a caller
+    without a request context: the worker and the retry path run outside one, and a
+    user token would expire mid-batch. Missing this header made every dispatch 401,
+    which the gateway then reported as IA_UNAVAILABLE."""
+    import jwt
+
+    import services.ia_gateway as gateway
+    from core.config import settings
+
+    upload(client)
+    meeting = client.get("/api/meetings").json()["items"][0]
+    sent = {}
+
+    def fake_request(client_, method, path, **kwargs):
+        sent["auth"] = client_.headers.get("Authorization")
+        return {"analysis_id": str(uuid4()), "status": "QUEUED",
+                "meeting_id": kwargs["json"]["meeting_id"]}
+
+    monkeypatch.setattr(gateway, "request_ia", fake_request)
+    assert client.post(f"/api/meetings/{meeting['id']}/analysis").status_code == 202
+
+    assert sent["auth"] and sent["auth"].startswith("Bearer ")
+    claims = jwt.decode(sent["auth"].removeprefix("Bearer "),
+                        settings.secret_key, algorithms=[settings.algorithm])
+    assert claims["sub"] == "kolia-backend"
+    assert claims["role"] == "SERVICE"
+
+
+def test_service_token_is_short_lived():
+    """A long-lived internal token is a standing credential; this one lasts minutes."""
+    import jwt
+
+    from core.config import settings
+    from services.ia_gateway import SERVICE_TOKEN_MINUTES, service_token
+
+    claims = jwt.decode(service_token(), settings.secret_key,
+                        algorithms=[settings.algorithm])
+    lifetime = claims["exp"] - datetime.now(timezone.utc).timestamp()
+    assert 0 < lifetime <= SERVICE_TOKEN_MINUTES * 60
+
+
+def test_ia_rejecting_the_token_is_reported_as_configuration_not_outage(client):
+    """401 from the IA means the secrets diverged; reporting it as an outage sends
+    whoever is on call to restart a service that is working fine."""
+    from main import app
+    from services.ia_gateway import get_ia_client
+
+    upload(client)
+    meeting = client.get("/api/meetings").json()["items"][0]
+
+    def unauthorized_ia():
+        # Only the IA client is faked: patching httpx globally would also answer
+        # the test client's own call to the backend.
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(401, json={"detail": "Token ausente."}))
+        with httpx.Client(base_url="http://ia", transport=transport) as fake:
+            yield fake
+
+    app.dependency_overrides[get_ia_client] = unauthorized_ia
+    try:
+        response = client.post(f"/api/meetings/{meeting['id']}/analysis")
+    finally:
+        app.dependency_overrides.pop(get_ia_client, None)
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert detail["code"] == "IA_AUTH_FAILED"
+    assert "JWT_SECRET" in detail["message"]

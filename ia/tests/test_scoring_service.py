@@ -350,15 +350,21 @@ class TestRealWorldCases:
 
 
 class TestDeclaredCodesWinOverWording:
-    """The point of the enum: scoring must not depend on how the model phrased a fact.
+    """With a model that can classify, codes outrank wording.
+
+    Off by default on this host — see TestDeclaredCodesAreNotTrustedByDefault —
+    so these enable it explicitly to exercise the mechanism.
 
     In production 250 of 500 churn signals scored 0 because the wording
     ("Potencial de perda...") missed a regex vocabulary. A declared code carries
     the classification, so the same meaning scores the same regardless of wording.
     """
 
-    def test_declared_code_scores_even_when_wording_matches_nothing(self):
+    def test_declared_code_scores_even_when_wording_matches_nothing(self, monkeypatch):
+        from src.app.core.config import settings
         from src.app.services.analysis_service import build_compact_final_summary
+
+        monkeypatch.setattr(settings, "trust_declared_motives", True)
 
         summary = {
             "pontos_chave": ["CHURN: cliente pode não fechar, vamos ver depois"],
@@ -368,8 +374,11 @@ class TestDeclaredCodesWinOverWording:
         result = build_compact_final_summary([summary], ["texto de origem"])
         assert result["risco_churn"]["score"] == 50
 
-    def test_two_different_wordings_of_one_code_score_the_same(self):
+    def test_two_different_wordings_of_one_code_score_the_same(self, monkeypatch):
+        from src.app.core.config import settings
         from src.app.services.analysis_service import build_compact_final_summary
+
+        monkeypatch.setattr(settings, "trust_declared_motives", True)
 
         scores = []
         for wording in ("Potencial de perda se os clientes não encontrarem valor",
@@ -397,3 +406,43 @@ class TestDeclaredCodesWinOverWording:
                    "motivos_oportunidade": []}
         result = build_compact_final_summary([summary], ["origem"])
         assert result["risco_churn"]["score"] == 0
+
+
+class TestDeclaredCodesAreNotTrustedByDefault:
+    """A small model given room enumerates the catalogue instead of choosing.
+
+    On the reference meeting it declared all five churn codes and all five
+    opportunity codes, turning a CRM demo into churn 100 where the rules said 30.
+    The catalogue stays in the prompt — removing it measured 2.3x slower — but
+    scoring reads the rules until a model that can classify is available.
+    """
+
+    def test_enumerated_codes_do_not_override_the_rules(self):
+        from src.app.services.analysis_service import build_compact_final_summary
+
+        todos = ["AMEACA_CANCELAMENTO", "INSATISFACAO_EXPLICITA",
+                 "MENCAO_CONCORRENTE", "RECLAMACAO_PRODUTO", "INATIVIDADE_PROLONGADA"]
+        summary = {"pontos_chave": ["CHURN: necessidade de otimizar a troca"],
+                   "motivos_churn": todos, "motivos_oportunidade": []}
+
+        result = build_compact_final_summary([summary], ["demonstração de CRM"])
+
+        assert result["risco_churn"]["score"] == 0, "sem sinal real, não pontua"
+
+    def test_a_score_and_its_reason_never_contradict(self):
+        from src.app.services.analysis_service import build_compact_final_summary
+
+        for pontos in (["CHURN: cliente ameaçou cancelar o contrato"],
+                       ["OPORTUNIDADE: querem ampliar para novas lojas"],
+                       ["PRODUTO: TOTVS ERP"]):
+            result = build_compact_final_summary(
+                [{"pontos_chave": pontos}], ["origem"])
+            for campo, vazio in (("risco_churn", "Nenhum sinal"),
+                                 ("score_oportunidade", "Nenhuma oportunidade")):
+                bloco = result[campo]
+                if bloco["score"]:
+                    assert not bloco["justificativa"].startswith(vazio), \
+                        f"{campo}: pontuou mas diz que não achou nada"
+                else:
+                    assert bloco["justificativa"].startswith(vazio), \
+                        f"{campo}: não pontuou mas apresenta justificativa"
