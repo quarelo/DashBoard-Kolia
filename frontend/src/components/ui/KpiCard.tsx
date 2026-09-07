@@ -4,8 +4,8 @@ import { cn } from "../../lib/utils";
 interface KpiCardProps {
   label: string;
   value: string | number;
-  change: number;
-  changeLabel: string;
+  change?: number;
+  changeLabel?: string;
   icon: React.ReactNode;
   accent?: "brand" | "emerald" | "rose" | "violet" | "blue";
 }
@@ -20,7 +20,7 @@ const accentMap = {
 
 export function KpiCard({ label, value, change, changeLabel, icon, accent = "brand" }: KpiCardProps) {
   const a = accentMap[accent];
-  const isPositive = change >= 0;
+  const isPositive = (change ?? 0) >= 0;
 
   return (
     <div className="card p-5 flex flex-col gap-4 hover:shadow-card-md transition-shadow">
@@ -35,13 +35,15 @@ export function KpiCard({ label, value, change, changeLabel, icon, accent = "bra
 
       <div>
         <p className="text-3xl font-extrabold text-ink tracking-tight">{value}</p>
-        <div className={cn(
-          "flex items-center gap-1 mt-1.5 text-xs font-semibold",
-          isPositive ? "text-emerald-600" : "text-rose-600"
-        )}>
-          {isPositive ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
-          <span>{isPositive ? "+" : ""}{change}% {changeLabel}</span>
-        </div>
+        {change !== undefined && (
+          <div className={cn(
+            "flex items-center gap-1 mt-1.5 text-xs font-semibold",
+            isPositive ? "text-emerald-600" : "text-rose-600"
+          )}>
+            {isPositive ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+            <span>{isPositive ? "+" : ""}{change}% {changeLabel}</span>
+          </div>
+        )}
       </div>
 
       {/* Accent bar */}

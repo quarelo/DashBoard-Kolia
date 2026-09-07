@@ -20,7 +20,7 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
-    command: ["sh", "-c", "alembic upgrade head && exec uvicorn main:app --host 0.0.0.0 --port 8080"]
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn main:app --host 0.0.0.0 --port 8080 --reload"]
     environment:
       # O .env manda quando define DATABASE_URL; sem ela, cai no serviço local.
       # Atenção: dentro do container, localhost é o próprio container — uma URL
@@ -31,6 +31,8 @@ services:
       ACCESS_TOKEN_EXPIRE_DAYS: 7
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
       IA_SERVICE_URL: http://ia-service:3000
+    volumes:
+      - ./backend:/app
     depends_on:
       postgres:
         condition: service_healthy

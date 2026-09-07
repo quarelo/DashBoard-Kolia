@@ -7,6 +7,7 @@ from core.config import settings
 from core.database import init_database
 from core.upload_limit import ImportBodyLimitMiddleware
 from routers.auth import router as auth_router
+from routers.dashboard import router as dashboard_router
 from routers.meetings import router as meetings_router
 
 
@@ -22,6 +23,7 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins,
                    allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type"])
 app.include_router(auth_router)
 app.include_router(meetings_router)
+app.include_router(dashboard_router)
 
 
 @app.get("/health")
