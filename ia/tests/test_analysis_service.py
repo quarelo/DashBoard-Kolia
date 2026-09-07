@@ -849,3 +849,35 @@ def test_chunk_with_a_vector_but_no_passages_gets_indexed(monkeypatch):
 
     assert legado.passages, "o chunk antigo passa a ter passagens"
     assert legado.embedding == [0.1] * 768, "e o vetor original é preservado"
+
+
+def test_multi_passage_chunk_does_not_pay_for_a_chunk_vector(monkeypatch):
+    """The chunk vector is only read by analyses indexed before passages existed.
+
+    Computing it for a new chunk costs one embedding call per chunk that nothing
+    ever reads — measured on the reference meeting, that was 208s of embedding
+    against 90s before. A chunk that is a single passage keeps it, because there
+    the vector is the same text and comes free.
+    """
+    analysis_id = uuid4()
+    analysis = MeetingAnalysis(
+        id=analysis_id, external_meeting_id=uuid4(), title="Longa",
+        status="DASHBOARD_READY", total_tokens=2000, total_chunks=1,
+        final_summary={"resumo_geral": "pronto"},
+    )
+    longo = MeetingChunk(
+        analysis_id=analysis_id, external_meeting_id=analysis.external_meeting_id,
+        chunk_index=1, token_count=2000,
+        content="palavra " * 2000, clean_content="palavra " * 2000,
+    )
+    session = FakeSession()
+    session.added.extend([analysis, longo])
+    calls = []
+    monkeypatch.setattr(analysis_service, "generate_embedding",
+                        lambda text: calls.append(text) or [0.4] * 768)
+
+    analysis_service.process_analysis_embeddings(session, analysis_id)
+
+    assert len(longo.passages) > 1, "um chunk longo vira várias passagens"
+    assert len(calls) == len(longo.passages), "uma chamada por passagem, e só"
+    assert longo.embedding is None, "sem vetor de chunk que ninguém leria"
