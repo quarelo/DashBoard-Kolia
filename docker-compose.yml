@@ -19,7 +19,10 @@ services:
       - "8080:8080"
     command: ["uvicorn", "routers.auth:app", "--host", "0.0.0.0", "--port", "8080"]
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-kolia}:${POSTGRES_PASSWORD:-kolia}@postgres:5432/${POSTGRES_DB:-kolia}
+      # O .env manda quando define DATABASE_URL; sem ela, cai no serviço local.
+      # Atenção: dentro do container, localhost é o próprio container — uma URL
+      # apontando para localhost no .env funciona fora do Docker e falha dentro.
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://${POSTGRES_USER:-kolia}:${POSTGRES_PASSWORD:-kolia}@postgres:5432/${POSTGRES_DB:-kolia}}
       SECRET_KEY: ${JWT_SECRET:-local-development-only-change-me}
       ALGORITHM: HS256
       ACCESS_TOKEN_EXPIRE_DAYS: 7
@@ -39,7 +42,10 @@ services:
       - "3000:3000"
     environment:
       PORT: 3000
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-kolia}:${POSTGRES_PASSWORD:-kolia}@postgres:5432/${POSTGRES_DB:-kolia}
+      # O .env manda quando define DATABASE_URL; sem ela, cai no serviço local.
+      # Atenção: dentro do container, localhost é o próprio container — uma URL
+      # apontando para localhost no .env funciona fora do Docker e falha dentro.
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://${POSTGRES_USER:-kolia}:${POSTGRES_PASSWORD:-kolia}@postgres:5432/${POSTGRES_DB:-kolia}}
       SECRET_KEY: ${JWT_SECRET:?defina JWT_SECRET no .env da raiz}
       ALGORITHM: HS256
       MAX_TOKENS_PER_CHUNK: ${MAX_TOKENS_PER_CHUNK:-2000}
