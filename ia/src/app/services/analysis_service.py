@@ -290,8 +290,13 @@ def build_analysis_progress(
     ) if total else 0
     percent = round((processed / total) * 100, 2) if total else 0.0
     is_partial = processed < total
+    # A chunk is indexed by its passages, or — for analyses indexed before passages
+    # existed — by its own vector. Counting only the chunk vector reported 0% on a
+    # finished analysis, because a multi-passage chunk no longer carries one.
     embedded = min(
-        sum(getattr(chunk, "embedding", None) is not None for chunk in chunks),
+        sum(bool(getattr(chunk, "passages", None))
+            or getattr(chunk, "embedding", None) is not None
+            for chunk in chunks),
         total,
     ) if total else 0
     embedding_percent = round((embedded / total) * 100, 2) if total else 0.0
