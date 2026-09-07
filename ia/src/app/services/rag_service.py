@@ -290,10 +290,21 @@ def search_analysis_chunks(
     if analysis is None:
         raise ValueError("Análise não encontrada.")
 
+    # A chunk is searchable through its passages or, for analyses indexed before
+    # passages existed, through its own vector. Requiring the chunk vector as well
+    # would force it to be computed for every new chunk just to satisfy this
+    # check, and nothing would ever read it — the passage path returns first.
+    indexed_passage = (
+        select(ChunkPassage.id)
+        .where(ChunkPassage.chunk_id == MeetingChunk.id,
+               ChunkPassage.embedding.is_not(None))
+        .exists()
+    )
     missing = db.execute(
         select(func.count(MeetingChunk.id)).where(
             MeetingChunk.analysis_id == analysis_id,
             MeetingChunk.embedding.is_(None),
+            ~indexed_passage,
         )
     ).scalar_one()
     if analysis.status != "DONE" or missing:
