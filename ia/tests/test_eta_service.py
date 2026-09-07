@@ -134,6 +134,15 @@ def test_finished_analysis_reports_no_remaining_time(db):
     assert estimate_analysis(db, done)["estimated_seconds_remaining"] is None
 
 
+def test_finished_analysis_reports_how_long_it_actually_took(db):
+    """elapsed_seconds must be the run's own duration (created_at to
+    updated_at), not "how long ago it finished" (created_at to now) — the
+    fixture's BASE is weeks in the past, so a bug here would report an
+    elapsed time in the millions of seconds instead of the 40 it took."""
+    done = add(db, 2, 40)
+    assert estimate_analysis(db, done)["elapsed_seconds"] == pytest.approx(40, abs=1)
+
+
 def test_backlog_counts_only_unfinished_work(db):
     add(db, 4, 60)                       # DONE, must not count
     add(db, 3, 0, status="PENDING", offset_minutes=1)
