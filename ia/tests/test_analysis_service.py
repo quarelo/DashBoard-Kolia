@@ -881,3 +881,21 @@ def test_multi_passage_chunk_does_not_pay_for_a_chunk_vector(monkeypatch):
     assert len(longo.passages) > 1, "um chunk longo vira várias passagens"
     assert len(calls) == len(longo.passages), "uma chamada por passagem, e só"
     assert longo.embedding is None, "sem vetor de chunk que ninguém leria"
+
+
+def test_embedding_progress_counts_passages_not_only_chunk_vectors():
+    """A finished analysis reported embed=0%: multi-passage chunks stopped carrying
+    a chunk vector, and the progress still counted only that."""
+    analysis = MeetingAnalysis(
+        external_meeting_id=uuid4(), title="Indexada", status="DONE", total_chunks=2,
+        summary_stage="COMPLETE", summary_is_final=True,
+    )
+    por_passagem = SimpleNamespace(
+        chunk_summary={}, embedding=None,
+        passages=[SimpleNamespace(embedding=[0.1])])
+    legado = SimpleNamespace(chunk_summary={}, embedding=[0.2], passages=[])
+
+    progresso = analysis_service.build_analysis_progress(
+        analysis, [por_passagem, legado])
+
+    assert progresso["embedding_progress_percent"] == 100.0
