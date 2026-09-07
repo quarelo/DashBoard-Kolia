@@ -1,9 +1,23 @@
 import { Bell, Search, ChevronDown, User, Settings } from "lucide-react";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { cn } from "../../lib/utils";
+import { useAuth } from "../../context/AuthContext";
+import { roleLabels } from "../../services/authService";
 
 export function Header() {
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const displayName = user?.name ?? "Usuário";
+  const displayRole = user ? roleLabels[user.role] : "";
+  const initial = displayName.charAt(0).toUpperCase();
+
+  function handleLogout() {
+    logout();
+    navigate("/login", { replace: true });
+  }
 
   return (
     <header className="h-14 bg-white border-b border-gray-200 flex items-center px-6 gap-4 flex-shrink-0">
@@ -50,11 +64,11 @@ export function Header() {
               className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
               style={{ background: "linear-gradient(135deg, #E76B38, #D85D2B)" }}
             >
-              C
+              {initial}
             </div>
             <div className="text-left hidden sm:block">
-              <p className="text-sm font-semibold text-gray-800 leading-none">Carlos Andrade</p>
-              <p className="text-[11px] text-gray-500 mt-0.5">Diretor Comercial</p>
+              <p className="text-sm font-semibold text-gray-800 leading-none">{displayName}</p>
+              <p className="text-[11px] text-gray-500 mt-0.5">{displayRole}</p>
             </div>
             <ChevronDown
               size={13}
@@ -67,8 +81,8 @@ export function Header() {
               <div className="fixed inset-0 z-10" onClick={() => setShowUserMenu(false)} />
               <div className="absolute right-0 top-full mt-2 w-52 bg-white rounded-xl shadow-lg border border-gray-200 py-1.5 z-20">
                 <div className="px-4 py-2.5 border-b border-gray-100 mb-1">
-                  <p className="text-sm font-semibold text-gray-800">Carlos Andrade</p>
-                  <p className="text-xs text-gray-500">carlos@totvs.com.br</p>
+                  <p className="text-sm font-semibold text-gray-800">{displayName}</p>
+                  <p className="text-xs text-gray-500">{user?.email}</p>
                 </div>
                 {[
                   { label: "Meu Perfil",   icon: User },
@@ -83,7 +97,10 @@ export function Header() {
                   </button>
                 ))}
                 <div className="border-t border-gray-100 mt-1 pt-1">
-                  <button className="w-full flex items-center gap-2.5 px-4 py-2 text-sm text-rose-600 hover:bg-rose-50 transition-colors">
+                  <button
+                    onClick={handleLogout}
+                    className="w-full flex items-center gap-2.5 px-4 py-2 text-sm text-rose-600 hover:bg-rose-50 transition-colors"
+                  >
                     Sair da conta
                   </button>
                 </div>

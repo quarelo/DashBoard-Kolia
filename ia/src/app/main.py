@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 from uuid import UUID
 
@@ -16,6 +17,9 @@ from src.app.schemas.analysis import (
     ChatRequest, ChatResponse,
 )
 from src.app.services.analysis_service import build_analysis_progress, prepare_analysis
+from src.app.services.llm_service import (
+    OllamaError, complete_missing_fields, missing_fields,
+)
 from src.app.services.analysis_worker import AnalysisWorker
 from src.app.services.analysis_submission import SubmissionConflict, submit_idempotent
 from src.app.services.eta_service import estimate_analysis, estimate_backlog, estimate_batch
@@ -43,6 +47,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="KOLIA IA Service", version="0.1.0", lifespan=lifespan)
+logger = logging.getLogger("uvicorn.error")
 
 
 @app.get("/")
@@ -131,6 +136,49 @@ def analysis_estimate(analysis_id: UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Análise não encontrada.")
     return {"analysis_id": analysis.id, "status": analysis.status,
             "total_chunks": analysis.total_chunks, **estimate_analysis(db, analysis)}
+
+
+@app.post("/analises/{analysis_id}/recompletar",
+          response_model=AnalysisDetailResponse,
+          dependencies=[Depends(verify_token)])
+def refill_missing_fields(analysis_id: UUID, db: Session = Depends(get_db)):
+    """Ask the model again for the fields this analysis left unanswered.
+
+    Deliberately manual, one analysis at a time: an empty field is often correct
+    (a transcript that never names a product), so refilling everything in the
+    pipeline would pay a call per analysis to invent content. Here someone is
+    looking at the card and decided the gap is wrong, and they see the result.
+
+    It is not a retry loop — one pass, using only the chunk summaries already
+    stored, and it never overwrites a field that already has content.
+    """
+    analysis = db.get(MeetingAnalysis, analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Análise não encontrada.")
+    if not analysis.summary_is_final:
+        raise HTTPException(
+            status_code=409,
+            detail="A análise ainda não terminou; aguarde o resumo final.")
+
+    chunks = _chunks_for_analysis(db, analysis.id)
+    summaries = [c.chunk_summary for c in chunks if c.chunk_summary]
+    if not summaries:
+        raise HTTPException(
+            status_code=409, detail="Esta análise não tem resumos de trecho para reusar.")
+
+    pending = missing_fields(analysis.final_summary or {}, include_empty=True)
+    if not pending:
+        return _detail(analysis, chunks)
+
+    try:
+        analysis.final_summary = complete_missing_fields(
+            analysis.final_summary or {}, summaries, include_empty=True)
+    except OllamaError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    db.commit()
+    db.refresh(analysis)
+    logger.info("analysis_id=%s refilled=%s", analysis.id, ",".join(pending))
+    return _detail(analysis, chunks)
 
 
 @app.get("/analises/{analysis_id}/chunks", response_model=list[ChunkResponse],

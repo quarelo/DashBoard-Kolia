@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 from threading import Barrier, Lock
 from types import SimpleNamespace
 
-from src.app.models.analysis import MeetingAnalysis, MeetingChunk
+from src.app.models.analysis import ChunkPassage, MeetingAnalysis, MeetingChunk
 from src.app.schemas.analysis import AnalyzeRequest
 from src.app.services import analysis_service
 from src.app.core.config import settings
@@ -729,7 +729,12 @@ def test_resume_summaries_skips_completed_chunks(monkeypatch):
     assert result.final_summary == {"resumo_geral": "já pronto, chunk dois"}
 
 
-def test_resume_embeddings_skips_existing_vectors(monkeypatch):
+def test_resume_embeddings_skips_chunks_that_are_fully_indexed(monkeypatch):
+    """Fully indexed now means a chunk vector *and* passages.
+
+    Skipping on the chunk vector alone would leave every analysis created before
+    passages existed without them for ever, and those are exactly the ones whose
+    retrieval is too coarse to find a price."""
     analysis_id = uuid4()
     analysis = MeetingAnalysis(
         id=analysis_id,
@@ -749,6 +754,9 @@ def test_resume_embeddings_skips_existing_vectors(monkeypatch):
         clean_content="chunk um",
         embedding=[0.1] * 768,
     )
+    first.passages.append(ChunkPassage(
+        analysis_id=analysis_id, passage_index=1,
+        content="chunk um", token_count=2, embedding=[0.1] * 768))
     second = MeetingChunk(
         analysis_id=analysis_id,
         external_meeting_id=analysis.external_meeting_id,
@@ -768,8 +776,12 @@ def test_resume_embeddings_skips_existing_vectors(monkeypatch):
 
     result = analysis_service.process_analysis_embeddings(session, analysis_id)
 
+    # One call, not two: the chunk is short enough to be its own single passage,
+    # so the passage reuses the vector instead of embedding the same text twice.
     assert calls == ["chunk dois"]
     assert second.embedding == [0.2] * 768
+    assert [p.content for p in second.passages] == ["chunk dois"]
+    assert second.passages[0].embedding == second.embedding
     assert result.status == "DONE"
     assert result.final_summary == {"resumo_geral": "pronto"}
 
@@ -810,3 +822,80 @@ def test_embedding_failure_preserves_dashboard(monkeypatch):
     assert result.status == "DASHBOARD_READY_WITH_EMBEDDING_ERROR"
     assert result.final_summary == {"resumo_geral": "continua disponível"}
     assert result.error_message == "embedding indisponível"
+
+
+def test_chunk_with_a_vector_but_no_passages_gets_indexed(monkeypatch):
+    """The migration path: analyses created before passages existed need them.
+
+    Their retrieval is the coarse one — a single vector over ~2000 tokens — which
+    is why asking about prices returned chunks that never mention R$.
+    """
+    analysis_id = uuid4()
+    analysis = MeetingAnalysis(
+        id=analysis_id, external_meeting_id=uuid4(), title="Antiga",
+        status="DASHBOARD_READY", total_tokens=2, total_chunks=1,
+        final_summary={"resumo_geral": "pronto"},
+    )
+    legado = MeetingChunk(
+        analysis_id=analysis_id, external_meeting_id=analysis.external_meeting_id,
+        chunk_index=1, token_count=2, content="valor de R$ 84,00 por licença",
+        clean_content="valor de R$ 84,00 por licença", embedding=[0.1] * 768,
+    )
+    session = FakeSession()
+    session.added.extend([analysis, legado])
+    monkeypatch.setattr(analysis_service, "generate_embedding", lambda text: [0.3] * 768)
+
+    analysis_service.process_analysis_embeddings(session, analysis_id)
+
+    assert legado.passages, "o chunk antigo passa a ter passagens"
+    assert legado.embedding == [0.1] * 768, "e o vetor original é preservado"
+
+
+def test_multi_passage_chunk_does_not_pay_for_a_chunk_vector(monkeypatch):
+    """The chunk vector is only read by analyses indexed before passages existed.
+
+    Computing it for a new chunk costs one embedding call per chunk that nothing
+    ever reads — measured on the reference meeting, that was 208s of embedding
+    against 90s before. A chunk that is a single passage keeps it, because there
+    the vector is the same text and comes free.
+    """
+    analysis_id = uuid4()
+    analysis = MeetingAnalysis(
+        id=analysis_id, external_meeting_id=uuid4(), title="Longa",
+        status="DASHBOARD_READY", total_tokens=2000, total_chunks=1,
+        final_summary={"resumo_geral": "pronto"},
+    )
+    longo = MeetingChunk(
+        analysis_id=analysis_id, external_meeting_id=analysis.external_meeting_id,
+        chunk_index=1, token_count=2000,
+        content="palavra " * 2000, clean_content="palavra " * 2000,
+    )
+    session = FakeSession()
+    session.added.extend([analysis, longo])
+    calls = []
+    monkeypatch.setattr(analysis_service, "generate_embedding",
+                        lambda text: calls.append(text) or [0.4] * 768)
+
+    analysis_service.process_analysis_embeddings(session, analysis_id)
+
+    assert len(longo.passages) > 1, "um chunk longo vira várias passagens"
+    assert len(calls) == len(longo.passages), "uma chamada por passagem, e só"
+    assert longo.embedding is None, "sem vetor de chunk que ninguém leria"
+
+
+def test_embedding_progress_counts_passages_not_only_chunk_vectors():
+    """A finished analysis reported embed=0%: multi-passage chunks stopped carrying
+    a chunk vector, and the progress still counted only that."""
+    analysis = MeetingAnalysis(
+        external_meeting_id=uuid4(), title="Indexada", status="DONE", total_chunks=2,
+        summary_stage="COMPLETE", summary_is_final=True,
+    )
+    por_passagem = SimpleNamespace(
+        chunk_summary={}, embedding=None,
+        passages=[SimpleNamespace(embedding=[0.1])])
+    legado = SimpleNamespace(chunk_summary={}, embedding=[0.2], passages=[])
+
+    progresso = analysis_service.build_analysis_progress(
+        analysis, [por_passagem, legado])
+
+    assert progresso["embedding_progress_percent"] == 100.0

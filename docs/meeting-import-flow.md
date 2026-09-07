@@ -97,14 +97,17 @@ upload simultâneo em processos diferentes.
 
 ## Endpoints e execução
 
-Execute o backend com dependências de `backend/requirements.txt` e PostgreSQL:
+Suba a stack pelo Docker Compose, da raiz do repositório — é o único modo
+suportado:
 
 ```sh
-cd backend
-uvicorn main:app --reload --port 8080
+docker compose up -d --build
 ```
 
-Configure `DATABASE_URL`, `SECRET_KEY` e `IA_SERVICE_URL` para o ambiente.
+A configuração vem do `.env` da raiz; o Compose injeta os mesmos valores como
+variáveis de ambiente, que têm precedência dentro do container. Não rode o
+backend com `uvicorn` no host: `IA_SERVICE_URL` aponta para `ia-service`, um nome
+que só resolve dentro da rede do Compose.
 Use `http://localhost:8080/docs`: registre/logue o usuário, copie `access_token`
 para o botão Authorize e envie o arquivo em `POST /api/imports`.
 
@@ -153,6 +156,22 @@ retornando 409 `DUPLICATE_IMPORT`.
 `include_versions=true` para ver as superadas, ou `/versions` para o histórico de
 uma reunião. Não há remoção nem sobrescrita de versões antigas: a limpeza de
 versões antigas, se desejada, é uma política à parte ainda não definida.
+
+## Busca e recuperação
+
+Cada bloco de ~2000 tokens é fatiado em passagens de ~400 (`ai.chunk_passages`),
+embeddadas individualmente. O bloco existe para resumir com poucas chamadas ao
+LLM; a passagem existe para buscar. Medido: um vetor sobre o bloco inteiro não
+trazia nenhuma das sete passagens que citam `R$` ao ser perguntado por valores.
+
+A busca roda por dois caminhos e funde por posição. O vetorial casa por assunto;
+o textual (`tsvector` em português, índice GIN) casa por palavra. Os termos da
+pergunta que aparecem em mais de 35% das passagens daquela análise são
+descartados — medido contra o próprio corpus, não contra uma lista escrita à mão,
+porque uma palavra genérica numa reunião pode ser o assunto central de outra.
+
+Análises indexadas antes das passagens continuam respondendo pelo vetor do bloco;
+o caminho antigo é o fallback. Reindexar não chama o LLM: são só os embeddings.
 
 ## Persistência e retomada
 

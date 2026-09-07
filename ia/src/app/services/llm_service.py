@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from src.app.core.config import settings
+from src.app.services.token_service import count_tokens
 from src.app.services.scoring_service import ChurnMotive, OpportunityMotive
 
 
@@ -333,17 +334,32 @@ FINAL_SUMMARY_SCHEMA = {
 }
 
 
+def missing_fields(final_summary: dict[str, Any], *, include_empty: bool = False) -> list[str]:
+    """Required fields the summary does not answer.
+
+    Absent or null is always missing. An empty list is only missing when asked for:
+    during the pipeline an empty `produto` usually means the transcript names no
+    product, and refilling it invites the model to invent one. On an explicit
+    request from someone looking at the card, the empty is what they want retried.
+    """
+    def unanswered(name: str) -> bool:
+        if name not in final_summary or final_summary[name] is None:
+            return True
+        value = final_summary[name]
+        return include_empty and isinstance(value, (list, dict, str)) and not value
+
+    return [name for name in FINAL_SUMMARY_SCHEMA["required"] if unanswered(name)]
+
+
 def complete_missing_fields(
     final_summary: dict[str, Any],
     chunk_summaries: list[dict],
     *,
+    include_empty: bool = False,
     client: httpx.Client | None = None,
 ) -> dict[str, Any]:
     properties = FINAL_SUMMARY_SCHEMA["properties"]
-    missing = [
-        name for name in FINAL_SUMMARY_SCHEMA["required"]
-        if name not in final_summary or final_summary[name] is None
-    ]
+    missing = missing_fields(final_summary, include_empty=include_empty)
     if not missing:
         return dict(final_summary)
     missing_schema = {
@@ -534,6 +550,24 @@ motivos_oportunidade:
 """
 
 
+def chunk_num_predict(clean_content: str) -> int:
+    """Output budget scaled to the chunk, because one setting cannot fit both sizes.
+
+    A truncated answer costs the whole call again at double the budget, so the
+    budget has to clear the answer the chunk actually warrants. Measured on real
+    chunks: a ~74-token CSV meeting is fastest at 256 and slower above it, while a
+    2000-token chunk truncated on 6 of 6 calls at 256 and on 1 of 6 at 512 — 132s
+    against 227s for the same six chunks.
+
+    A quarter of the input lands on both of those points; the floor and the ceiling
+    keep a tiny chunk from starving and a huge one from paying for tokens the model
+    never produces.
+    """
+    estimated = count_tokens(clean_content) // 4
+    return max(settings.ollama_chunk_num_predict,
+               min(estimated, settings.ollama_chunk_num_predict_max))
+
+
 def generate_chunk_summary(
     clean_content: str, *, client: httpx.Client | None = None
 ) -> dict[str, Any]:
@@ -567,7 +601,7 @@ deles. Não invente fatos.
         CHUNK_SUMMARY_SCHEMA if settings.chunk_motive_classification
         else CHUNK_SUMMARY_SCHEMA_NO_MOTIVES,
         settings.ollama_chunk_think,
-        settings.ollama_chunk_num_predict,
+        chunk_num_predict(clean_content),
         settings.chunk_model,
         client=client,
     )
