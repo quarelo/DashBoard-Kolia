@@ -28,4 +28,4 @@ __pycache__
 .venv
 venv
 .poc_password
-ia/tests/dataset_tratado_revisado.csv
+ia/dataset_tratado_revisado.csv
