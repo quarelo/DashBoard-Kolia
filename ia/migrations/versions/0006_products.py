@@ -6,8 +6,13 @@ row. The HNSW index is what makes the future "top 5 candidates" similarity
 search cheap; cosine matches the distance operator already used for
 meeting_chunks.embedding.
 
-Revision ID: 0004
-Revises: 0003
+Revision ID: 0006
+Revises: 0005
+
+Numbered 0006, not 0004: it was written in parallel with 0004_chunk_passages
+and 0005_passage_fulltext (the hybrid-search work), both of which also
+branched off 0003 and landed on main first. Renumbered after them instead of
+keeping 0004, to avoid two revisions claiming the same id.
 """
 from typing import Sequence, Union
 
@@ -18,8 +23,8 @@ from sqlalchemy.dialects.postgresql import UUID
 
 from src.app.core.config import settings
 
-revision: str = "0004"
-down_revision: Union[str, None] = "0003"
+revision: str = "0006"
+down_revision: Union[str, None] = "0005"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -501,6 +501,94 @@ def test_summary_worker_honours_max_llm_chunks(monkeypatch):
     assert all(chunk.chunk_summary is not None for chunk in chunks)
 
 
+def test_product_grounding_replaces_produto_with_the_catalogue_answer(monkeypatch):
+    """End-to-end at the orchestration level: whatever build_compact_final_summary
+    guessed for `produto` from pontos_chave gets overwritten by whatever
+    ground_products (mocked here; unit-tested on its own in
+    test_product_service.py and test_llm_service.py) answers instead."""
+    analysis_id = uuid4()
+    analysis = MeetingAnalysis(
+        id=analysis_id,
+        external_meeting_id=uuid4(),
+        title="Reunião sobre CRM",
+        status="PROCESSING",
+        total_chunks=1,
+    )
+    chunk = MeetingChunk(
+        analysis_id=analysis_id,
+        external_meeting_id=analysis.external_meeting_id,
+        chunk_index=1,
+        token_count=3,
+        content="Cliente perguntou sobre o CRM.",
+        clean_content="Cliente perguntou sobre o CRM.",
+    )
+    session = FakeSession()
+    session.add(analysis)
+    session.add(chunk)
+
+    monkeypatch.setattr(
+        analysis_service,
+        "generate_chunk_summary",
+        lambda _text: {"pontos_chave": ["PRODUTO: CRM de vendas"]},
+    )
+    seen = {}
+
+    def fake_ground_products(_db, text, _top_k):
+        seen["query"] = text
+        return ["TOTVS CRM"]
+
+    monkeypatch.setattr(analysis_service, "ground_products", fake_ground_products)
+
+    result = analysis_service.process_analysis_summaries(db=session, analysis_id=analysis_id)
+
+    # The free-text guess ("CRM de vendas") never reaches the dashboard; only
+    # the catalogue-grounded name does.
+    assert result.final_summary["produto"] == ["TOTVS CRM"]
+    assert seen["query"] == "CRM de vendas"
+
+
+def test_product_grounding_is_skipped_when_no_product_was_even_mentioned(monkeypatch):
+    """No point spending an embedding call and an Ollama call on a meeting that
+    said nothing product-shaped — and skipping must not erase a `produto` the
+    consolidation step already set for some other reason."""
+    analysis_id = uuid4()
+    analysis = MeetingAnalysis(
+        id=analysis_id,
+        external_meeting_id=uuid4(),
+        title="Reunião sem produto",
+        status="PROCESSING",
+        total_chunks=1,
+    )
+    chunk = MeetingChunk(
+        analysis_id=analysis_id,
+        external_meeting_id=analysis.external_meeting_id,
+        chunk_index=1,
+        token_count=3,
+        content="Combinamos a data da próxima reunião.",
+        clean_content="Combinamos a data da próxima reunião.",
+    )
+    session = FakeSession()
+    session.add(analysis)
+    session.add(chunk)
+
+    monkeypatch.setattr(
+        analysis_service,
+        "generate_chunk_summary",
+        lambda _text: {"pontos_chave": ["AÇÃO: combinar próxima reunião"]},
+    )
+    monkeypatch.setattr(
+        analysis_service,
+        "ground_products",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("não deveria consultar o catálogo sem menção a produto")
+        ),
+    )
+
+    result = analysis_service.process_analysis_summaries(db=session, analysis_id=analysis_id)
+
+    assert result.final_summary["produto"] == []
+
+
 def test_single_compact_chunk_preserves_key_points_as_evidence():
     summary = {
         "pontos_chave": [
@@ -605,7 +693,11 @@ def test_compact_summary_anchors_critical_fields_in_transcription():
         ],
     )
 
-    assert result["produto"] == ["TotoCRM / CRM de automação de força de vendas"]
+    # build_compact_final_summary no longer names a product from raw keywords
+    # (that used to turn any "CRM" mention into a fixed, unconfirmed string);
+    # grounding against the real catalogue now happens once per analysis, in
+    # process_analysis_summaries via product_service.ground_products.
+    assert result["produto"] == []
     assert "gestor" in result["persona"]
     assert result["sentimento"]["classificacao"] == "misto"
     assert result["risco_churn"]["score"] == 0

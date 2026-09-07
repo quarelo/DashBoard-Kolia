@@ -76,6 +76,22 @@ class Settings(BaseSettings):
     max_llm_chunks: int = 15
     fast_transcription_retention_ratio: float = 0.05
     fast_deterministic_consolidation: bool = True
+    # One extra Ollama call per analysis (never per chunk): see
+    # docs/product-catalog-grounding.md for why the granularity trade-off was
+    # accepted for this host. Off falls back to whatever `produto` the
+    # consolidation step already produced, ungrounded.
+    product_grounding_enabled: bool = True
+    product_grounding_top_k: int = 5
+    # Distance decides the clear-cut cases so the model is only asked to
+    # arbitrate real ambiguity: at or below `confident`, the closest catalogue
+    # match is accepted with no Ollama call; above `plausible`, a candidate is
+    # dropped before ever reaching the model. Chosen to sit around the same
+    # cosine-distance ballpark as chat_similarity_threshold=0.55 (equivalent to
+    # distance 0.45) already in use for the RAG chat's own relevance cutoff;
+    # not yet calibrated against this catalogue's real embeddings the way that
+    # one was, since that needs the model actually running on real meetings.
+    product_grounding_confident_distance: float = 0.20
+    product_grounding_plausible_distance: float = 0.45
     model: str = Field(default="qwen2.5:3b", validation_alias=AliasChoices("MODEL", "OLLAMA_MODEL"))
     chunk_model: str = Field(default="gemma3:1b", validation_alias=AliasChoices("CHUNK_MODEL", "OLLAMA_CHUNK_MODEL"))
     consolidation_model: str = Field(default="gemma3:1b", validation_alias=AliasChoices("CONSOLIDATION_MODEL", "OLLAMA_CONSOLIDATION_MODEL"))
