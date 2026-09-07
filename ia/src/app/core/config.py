@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     max_tokens_per_chunk: int = 2000
     overlap_tokens: int = 120
     embedding_dim: int = 768
+    # Retrieval granularity, independent of the chunk size used for summarising.
+    # ~400 tokens is a few sentences: small enough that one price does not get
+    # averaged away, large enough to carry its own context.
+    passage_tokens: int = 400
+    passage_overlap_tokens: int = 40
     ollama_generate_url: str = "http://ollama:11434/api/generate"
     ollama_embed_url: str = "http://ollama:11434/api/embed"
     ollama_think: bool = True
@@ -34,12 +39,22 @@ class Settings(BaseSettings):
     # 140s with 3 retries against 97s and none at 256. Asking for more up front
     # is the cheaper trade here.
     ollama_chunk_num_predict: int = 256
+    # Ceiling for the per-chunk budget. Above 512 the extra tokens bought nothing
+    # on real chunks (768 measured slower than 512 with the same retry count).
+    ollama_chunk_num_predict_max: int = 512
     # On, and not only for the codes: measured over 14 real meetings, dropping the
     # catalogue was 2.3x SLOWER (301s against 132s, 8 truncations against none).
     # The block seems to anchor the answer — without it the model rambles in
     # pontos_chave and overruns the budget, and each overrun costs a full retry.
     # The 1B still returns no usable codes, so scoring runs on motive_rules.py.
     chunk_motive_classification: bool = True
+    # Whether the codes the model declares outrank the rules. Off: this 1B scored
+    # 3 of 6 on that judgement, and given room it enumerates the catalogue instead
+    # of choosing — on the reference meeting it declared all five churn codes and
+    # pushed a CRM demo to churn 100, against 30 from the rules. The catalogue
+    # stays in the prompt because removing it measured 2.3x slower; only the
+    # scoring stops believing it. Turn on with a model that can classify.
+    trust_declared_motives: bool = False
     ollama_consolidation_think: bool = False
     ollama_consolidation_num_predict: int = 384
     ollama_keep_alive: str = "30m"
