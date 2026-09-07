@@ -1,3 +1,18 @@
+export type Role = "SALES_DIRECTOR" | "USER";
+
+export interface AuthUser {
+  id: number;
+  name: string;
+  email: string;
+  role: Role;
+}
+
+export interface LoginResponse {
+  access_token: string;
+  token_type: string;
+  expires_in_days: number;
+}
+
 export type Priority = "critical" | "high" | "medium" | "low";
 export type InsightType =
   | "churn_risk"
