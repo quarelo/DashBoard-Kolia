@@ -97,14 +97,17 @@ upload simultâneo em processos diferentes.
 
 ## Endpoints e execução
 
-Execute o backend com dependências de `backend/requirements.txt` e PostgreSQL:
+Suba a stack pelo Docker Compose, da raiz do repositório — é o único modo
+suportado:
 
 ```sh
-cd backend
-uvicorn main:app --reload --port 8080
+docker compose up -d --build
 ```
 
-Configure `DATABASE_URL`, `SECRET_KEY` e `IA_SERVICE_URL` para o ambiente.
+A configuração vem do `.env` da raiz; o Compose injeta os mesmos valores como
+variáveis de ambiente, que têm precedência dentro do container. Não rode o
+backend com `uvicorn` no host: `IA_SERVICE_URL` aponta para `ia-service`, um nome
+que só resolve dentro da rede do Compose.
 Use `http://localhost:8080/docs`: registre/logue o usuário, copie `access_token`
 para o botão Authorize e envie o arquivo em `POST /api/imports`.
 

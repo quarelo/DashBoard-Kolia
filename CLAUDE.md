@@ -18,12 +18,39 @@ Dois serviços dividem um PostgreSQL e a fronteira é o schema: `core` é do
 backend, `ai` é da IA, e nenhum escreve na tabela do outro. Cada um tem seu
 Alembic e sua tabela de versão, no seu schema.
 
+## Execução
+
+**Tudo roda no Docker Compose, sempre.** Nada de `uvicorn` ou `npm run dev` no
+host, nem para um teste rápido:
+
+```bash
+docker compose up -d --build
+docker compose ps   # os cinco: postgres, ollama, ia-service, backend, frontend
+```
+
+`./backend` e `./frontend` são bind mounts com reload, então editar no host já
+recarrega o container — subir à mão não adianta nada e quebra a rede. Os nomes
+dos serviços são os hostnames: o backend só acha a IA em `http://ia-service:3000`
+e a IA só acha o Ollama em `http://ollama:11434`, nomes que existem apenas dentro
+de `kolia-network`.
+
+Subir metade fora do Compose falha de um jeito que não parece rede. Com a IA
+rodando no host em `127.0.0.1:3000` e o resto em container, o backend resolveu
+`ia-service` para nada (`ConnectError: Name or service not known`) e o chat do
+dashboard respondeu **503 `IA_UNAVAILABLE`** a toda mensagem, como se a IA
+estivesse fora do ar. Publicar o processo do host em `0.0.0.0` também não
+resolveria: falta o nome, não a porta.
+
+Para depurar um serviço isolado, use o ambiente do próprio container
+(`docker compose exec ia-service ...`) em vez de abrir um processo paralelo.
+
 ## Configuração
 
 Existe **um** `.env`, na raiz, ao lado do `docker-compose.yml`. As configs dos dois
-serviços o resolvem por caminho absoluto, então não importa de onde o uvicorn
-roda. Dentro dos containers o arquivo não existe e o Compose injeta os mesmos
-valores como variáveis de ambiente, que têm precedência.
+serviços o resolvem por caminho absoluto, então o diretório de trabalho não
+importa. Dentro dos containers o arquivo não existe e o Compose injeta os mesmos
+valores como variáveis de ambiente, que têm precedência — é assim que os
+serviços recebem `postgres:5432` e `ollama:11434` no lugar do que o arquivo diz.
 
 O arquivo usa os nomes que o Compose interpola (`JWT_SECRET`, `OLLAMA_MODEL`), e
 as configs aceitam as duas grafias por `AliasChoices`.

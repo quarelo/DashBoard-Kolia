@@ -120,6 +120,12 @@ segredos reais no arquivo `.env`.
 
 ## Executar
 
+Os cinco serviços sobem juntos, pelo Compose. **Não rode nenhum deles no host**
+— nem "só a IA", nem "só o backend": os serviços se acham pelo nome
+(`ia-service`, `ollama`, `postgres`), e esse nome só resolve dentro de
+`kolia-network`. Com a IA no host e o resto em container, o backend não a
+encontra e o chat do dashboard devolve `503 IA_UNAVAILABLE` em toda mensagem.
+
 Na raiz do projeto, suba tudo com logs visíveis:
 
 ```bash
