@@ -851,17 +851,10 @@ def process_analysis_embeddings(
                 continue
             started_at = perf_counter()
             text = chunk.clean_content or chunk.content
-            # The chunk vector stays: it is what an existing analysis was indexed
-            # with, and coarse retrieval still falls back to it.
-            if chunk.embedding is None:
-                chunk.embedding = generate_embedding(text)
             if not chunk.passages:
-                for index, passage in enumerate(iter_passages(text), start=1):
-                    # A chunk short enough to be a single passage is the same text
-                    # twice; embedding it again would double the cost of every
-                    # one-chunk meeting, which is all 500 in the CSV.
-                    vector = (chunk.embedding if passage == text
-                              else generate_embedding(passage))
+                pieces = iter_passages(text)
+                for index, passage in enumerate(pieces, start=1):
+                    vector = generate_embedding(passage)
                     chunk.passages.append(ChunkPassage(
                         analysis_id=analysis.id,
                         passage_index=index,
@@ -869,6 +862,13 @@ def process_analysis_embeddings(
                         token_count=count_tokens(passage),
                         embedding=vector,
                     ))
+                    # A chunk that is a single passage is the same text, so the
+                    # chunk vector comes free. Computing it for a multi-passage
+                    # chunk would pay an extra call per chunk for a vector the
+                    # search never reads: passages answer first, and the chunk
+                    # vector only serves analyses indexed before they existed.
+                    if len(pieces) == 1 and chunk.embedding is None:
+                        chunk.embedding = vector
             logger.info(
                 "analysis_id=%s chunk=%d passages=%d embedding_seconds=%.3f",
                 analysis.id,
