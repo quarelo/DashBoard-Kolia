@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 import jwt
+from jwt import InvalidTokenError
 from core.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -17,3 +18,9 @@ def create_access_token(data: dict):
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
     return encoded_jwt
+
+def decode_access_token(token: str) -> dict | None:
+    try:
+        return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+    except InvalidTokenError:
+        return None

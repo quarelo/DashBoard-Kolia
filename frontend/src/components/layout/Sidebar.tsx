@@ -1,4 +1,4 @@
-import { NavLink } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
   Lightbulb,
@@ -10,6 +10,8 @@ import {
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { KoliaLogo } from "../ui/KoliaLogo";
+import { useAuth } from "../../context/AuthContext";
+import { roleLabels } from "../../services/authService";
 
 interface SidebarProps {
   collapsed: boolean;
@@ -24,6 +26,18 @@ const navItems = [
 ];
 
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const displayName = user?.name ?? "Usuário";
+  const displayRole = user ? roleLabels[user.role] : "";
+  const initial = displayName.charAt(0).toUpperCase();
+
+  function handleLogout() {
+    logout();
+    navigate("/login", { replace: true });
+  }
+
   return (
     <aside
       className={cn(
@@ -102,14 +116,17 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
                 className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
                 style={{ background: "linear-gradient(135deg, #E76B38, #D85D2B)" }}
               >
-                C
+                {initial}
               </div>
               <div className="min-w-0">
-                <p className="text-xs font-semibold text-white truncate">Carlos Andrade</p>
-                <p className="text-[10px] text-gray-500 truncate">Diretor Comercial</p>
+                <p className="text-xs font-semibold text-white truncate">{displayName}</p>
+                <p className="text-[10px] text-gray-500 truncate">{displayRole}</p>
               </div>
             </div>
-            <button className="w-full flex items-center gap-2 text-[11px] text-gray-500 hover:text-gray-300 transition-colors">
+            <button
+              onClick={handleLogout}
+              className="w-full flex items-center gap-2 text-[11px] text-gray-500 hover:text-gray-300 transition-colors"
+            >
               <LogOut size={11} />
               Sair da conta
             </button>
@@ -117,13 +134,20 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         )}
 
         {collapsed && (
-          <div className="flex justify-center mb-1">
+          <div className="flex flex-col items-center gap-1 mb-1">
             <div
               className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold"
               style={{ background: "linear-gradient(135deg, #E76B38, #D85D2B)" }}
             >
-              C
+              {initial}
             </div>
+            <button
+              onClick={handleLogout}
+              title="Sair da conta"
+              className="p-1.5 rounded-lg text-gray-500 hover:text-gray-200 hover:bg-white/10 transition-colors"
+            >
+              <LogOut size={13} />
+            </button>
           </div>
         )}
 

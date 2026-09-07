@@ -44,9 +44,14 @@ There are no `__init__.py` files — modules import each other with flat paths (
 
 ## Auth flow
 
+- Routes are mounted under `/auth` (`/auth/register`, `/auth/login`, `/auth/me`).
+- `GET /auth/me` — returns the current user (`id, name, email, role`); requires
+  `Authorization: Bearer <token>`. `core/deps.py::get_current_user` decodes the JWT
+  (`core/security.py::decode_access_token`), reads `sub` (email), loads the row; 401
+  on missing/invalid/expired token or unknown user.
 - `POST /register` — 201 on success, 400 if email already exists. Hashes password with bcrypt via `passlib`. Password is validated at the schema layer to be 8–72 chars (`schemas/user.py`) — 72 is bcrypt's hard byte limit; passlib raises `ValueError` past that instead of truncating, so this guard prevents a 500 on long passwords.
 - `POST /login` — verifies password, returns `{access_token, token_type, expires_in_days}` where `expires_in_days` is read from `settings.access_token_expire_days` (previously hardcoded to `7`, which would silently drift from the real token `exp` if `ACCESS_TOKEN_EXPIRE_DAYS` were ever changed). JWT payload is `{sub: email, role, exp}`, signed HS256.
-- `core/auth.py` verifies JWT signature, expiration and subject, resolves the user and protects import/meeting routes. All meeting queries scope by owner.
+- `core/auth.py` verifies JWT signature, expiration and subject, resolves the user and protects import/meeting routes. All meeting queries scope by owner. `GET /me` (via `routers/auth.py`) returns the authenticated user and is the first consumer for the frontend session bootstrap.
 - CORS defaults to `http://localhost:5173`; `CORS_ORIGINS` accepts a JSON array of allowed origins.
 
 ## Config / secrets
