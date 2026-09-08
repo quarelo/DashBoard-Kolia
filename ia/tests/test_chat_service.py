@@ -142,7 +142,14 @@ def test_weak_evidence_returns_unknown_without_calling_model(monkeypatch):
     assert result["fallback_reason"] == "insufficient_evidence"
 
 
-def test_low_lexical_coverage_skips_model_even_with_moderate_similarity(monkeypatch):
+def test_unanswerable_question_falls_back_on_the_model_verdict(monkeypatch):
+    """Evidence that does not answer the question is rejected after generation.
+
+    This case used to be decided before the model was called, by lexical
+    coverage plus a 0.70 similarity floor. That guess was anti-correlated with
+    the truth on 22 measured questions, so the verdict now comes from the only
+    step that reads the passage.
+    """
     monkeypatch.setattr(
         chat_service,
         "search_analysis_chunks",
@@ -158,11 +165,9 @@ def test_low_lexical_coverage_skips_model_even_with_moderate_similarity(monkeypa
             ],
         },
     )
-
-    def forbidden_generate(_prompt):
-        raise AssertionError("Evidência com um único conceito não deve chamar o modelo")
-
-    monkeypatch.setattr(chat_service, "generate_chat_answer", forbidden_generate)
+    monkeypatch.setattr(
+        chat_service, "generate_chat_answer", lambda _prompt: chat_service.UNKNOWN_ANSWER
+    )
 
     result = chat_service.answer_analysis_question(
         object(), ANALYSIS_ID, request("Qual era a cor do carro pessoal do diretor?")
@@ -171,6 +176,47 @@ def test_low_lexical_coverage_skips_model_even_with_moderate_similarity(monkeypa
     assert result["grounded"] is False
     assert result["citations"] == []
     assert result["fallback_reason"] == "insufficient_evidence"
+
+
+def test_evidence_above_threshold_reaches_the_model_without_lexical_overlap(monkeypatch):
+    """A question whose words are absent from the transcript must still be answered.
+
+    A transcript expresses sentiment without ever writing "sentimento", so
+    lexical overlap is structurally near zero for the analytical questions the
+    chat exists to answer. Gating on it cut 6 of 14 answerable questions,
+    "Qual o sentimento do cliente?" among them, at similarity 0.679.
+    """
+    reached = {}
+
+    def capture(prompt):
+        reached["prompt"] = prompt
+        return "O cliente demonstrou preocupação com o custo da migração."
+
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [
+                evidence(
+                    "Olha, sinceramente ficou caro demais para o retorno que a gente vê.",
+                    similarity=0.62,
+                )
+            ],
+        },
+    )
+    monkeypatch.setattr(chat_service, "generate_chat_answer", capture)
+
+    result = chat_service.answer_analysis_question(
+        object(), ANALYSIS_ID, request("Qual o sentimento do cliente nessa reunião?")
+    )
+
+    assert "prompt" in reached, "evidência acima do threshold deve chegar ao modelo"
+    assert result["grounded"] is True
+    assert result["fallback_reason"] is None
+    assert result["citations"]
 
 
 def test_lexical_normalization_does_not_merge_director_with_direto_or_pessoal_with_pessoa():
