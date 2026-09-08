@@ -277,19 +277,24 @@ def answer_analysis_question(
             "fallback_reason": None,
         }
 
-    query_terms = _lexical_terms(search_query)
-    lexical_coverage = len(query_terms & _lexical_terms(evidence[0]["excerpt"]))
-    coverage_ratio = lexical_coverage / max(1, len(query_terms))
-    structured_relevance = excerpt_relevance_score(
-        evidence[0]["excerpt"], search_query
-    )
-    if (
-        coverage_ratio < 0.60
-        and structured_relevance < 45
-        and float(evidence[0]["similarity"]) < 0.70
-    ):
-        return _fallback(analysis_id, INSUFFICIENT_EVIDENCE)
-
+    # Whether the retrieved passage actually answers the question is decided
+    # after generation, by _is_unknown_answer, because only reading the passage
+    # settles it. There used to be a pre-generation gate here that guessed from
+    # retrieval scores — lexical coverage of the question's words, plus a
+    # hardcoded 0.70 similarity floor above the configured 0.55 — and it was
+    # anti-correlated with the truth: it rejected 6 of 14 answerable questions
+    # while admitting 3 of 8 unanswerable ones. "Qual o CNPJ da empresa?" scored
+    # the highest similarity of the whole set, 0.842 with full lexical coverage,
+    # because stopword removal leaves {cnpj, empresa} and the transcript is full
+    # of [EMPRESA]; "Qual o sentimento do cliente?" was cut at 0.679, since a
+    # transcript expresses sentiment without ever naming it.
+    #
+    # Retuning the number cannot fix it: over those 22 questions the answerable
+    # band (0.557-0.732) and the unanswerable one (0.566-0.842) overlap almost
+    # entirely, and contrast against the candidate pool separates them no better
+    # (mean top1-median gap 0.048 vs 0.025, ranges overlapping). With a single
+    # 40k-token meeting as the corpus, best-passage similarity measures how
+    # generic the question is, not whether the answer is in there.
     try:
         answer = generate_chat_answer(_build_prompt(request, evidence)).strip()
     except OllamaError:
