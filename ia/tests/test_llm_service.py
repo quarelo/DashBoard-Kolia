@@ -8,11 +8,13 @@ from src.app.services.llm_service import (
     OllamaError,
     OllamaModelNotFoundError,
     OllamaResponseError,
+    classify_products,
     consolidate_summaries,
     complete_missing_fields,
     generate_chunk_summary,
     generate_chat_answer,
     generate_embedding,
+    product_classification_schema,
 )
 
 
@@ -499,3 +501,64 @@ def test_chunk_budget_never_leaves_the_configured_window():
     for texto in ("", "a", "palavra " * 500, "palavra " * 50_000):
         budget = chunk_num_predict(texto)
         assert settings.ollama_chunk_num_predict <= budget <= settings.ollama_chunk_num_predict_max
+
+
+def test_product_classification_schema_enum_is_exactly_the_candidates():
+    """The model cannot return a name that isn't in this list — same mechanism
+    already used for motivos_churn/motivos_oportunidade, but built at call time
+    from whatever the catalogue search returned instead of a fixed Enum class."""
+    schema = product_classification_schema(["TOTVS ERP", "App Meu RH"])
+
+    items = schema["properties"]["produtos_identificados"]["items"]
+    assert items["enum"] == ["TOTVS ERP", "App Meu RH"]
+    assert schema["properties"]["produtos_identificados"]["maxItems"] == 2
+    assert schema["additionalProperties"] is False
+
+
+def test_classify_products_skips_ollama_when_there_are_no_candidates():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("não deveria chamar o Ollama sem candidatos")
+
+    assert classify_products("reunião sobre CRM", [], client=client_for(handler)) == []
+
+
+def test_classify_products_keeps_only_names_the_catalogue_actually_offered(monkeypatch):
+    """A model can still hallucinate text even inside a constrained schema call
+    (e.g. a repaired/salvaged response); the result is filtered defensively
+    against the real candidate list, the same way _valid_codes guards motives."""
+    monkeypatch.setattr(settings, "consolidation_model", "modelo-produto:latest")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["model"] == "modelo-produto:latest"
+        assert payload["format"]["properties"]["produtos_identificados"]["items"]["enum"] == [
+            "TOTVS ERP", "App Meu RH",
+        ]
+        return httpx.Response(200, json={
+            "response": json.dumps({
+                "produtos_identificados": ["TOTVS ERP", "Produto Inventado"],
+            }),
+        })
+
+    result = classify_products(
+        "o cliente comentou sobre o ERP",
+        [("TOTVS ERP", "Sistema de gestão."), ("App Meu RH", "App do colaborador.")],
+        client=client_for(handler),
+    )
+
+    assert result == ["TOTVS ERP"]
+
+
+def test_classify_products_returns_empty_list_when_no_candidate_applies():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"response": '{"produtos_identificados": []}'}
+        )
+
+    result = classify_products(
+        "reunião só sobre férias da equipe",
+        [("TOTVS ERP", "Sistema de gestão.")],
+        client=client_for(handler),
+    )
+
+    assert result == []

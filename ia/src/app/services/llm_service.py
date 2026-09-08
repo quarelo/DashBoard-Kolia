@@ -672,6 +672,76 @@ RESUMOS PARCIAIS:
     )
 
 
+def product_classification_schema(candidate_names: list[str]) -> dict[str, Any]:
+    """Enum built from the candidates themselves, not a fixed list in the code.
+
+    Same mechanism as CHUNK_SUMMARY_SCHEMA's motivos_churn/motivos_oportunidade:
+    the enum makes an out-of-catalogue name impossible to return, not just
+    discouraged by the prompt.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "produtos_identificados": {
+                "type": "array",
+                "items": {"type": "string", "enum": candidate_names},
+                "maxItems": min(len(candidate_names), 3),
+            },
+        },
+        "required": ["produtos_identificados"],
+        "additionalProperties": False,
+    }
+
+
+def classify_products(
+    evidence_text: str,
+    candidates: list[tuple[str, str]],
+    *,
+    client: httpx.Client | None = None,
+) -> list[str]:
+    """Pick, from up to 5 real catalogue candidates, which ones the meeting mentions.
+
+    `candidates` already comes from a pgvector similarity search against
+    ai.products (see product_service.find_candidate_products) — this call never
+    sees the whole catalogue, only the closest matches. Returning an empty list
+    is the correct answer when none of the candidates actually apply; nothing
+    here pressures the model into forcing a match.
+    """
+    if not candidates:
+        return []
+    names = [name for name, _description in candidates]
+    catalogue_block = "\n".join(
+        f"- {name}: {description}" for name, description in candidates
+    )
+    prompt = f"""Você recebeu uma lista fechada de produtos TOTVS, já
+pré-selecionados por similaridade com o conteúdo da reunião. Releia o
+conteúdo abaixo e decida quais desses candidatos a reunião realmente
+menciona. Nunca escreva um nome fora da lista de candidatos. Devolva lista
+vazia se nenhum candidato se aplica de fato; não force uma escolha.
+
+CANDIDATOS:
+{catalogue_block}
+
+CONTEÚDO DA REUNIÃO:
+{evidence_text}"""
+    result = _generate_json(
+        prompt,
+        product_classification_schema(names),
+        False,
+        192,
+        settings.consolidation_model,
+        client=client,
+    )
+    identified = result.get("produtos_identificados")
+    if not isinstance(identified, list):
+        return []
+    seen: list[str] = []
+    for name in identified:
+        if isinstance(name, str) and name in names and name not in seen:
+            seen.append(name)
+    return seen
+
+
 def generate_embedding(
     text: str, *, client: httpx.Client | None = None
 ) -> list[float]:

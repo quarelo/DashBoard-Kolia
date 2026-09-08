@@ -144,6 +144,14 @@ def calibrate(db: Session) -> Calibration:
 
 
 def _elapsed(analysis: MeetingAnalysis) -> float:
+    """How long a still-running analysis has been going, measured against now.
+
+    Only meaningful while the analysis is pending: `remaining = total -
+    _elapsed(...)` needs "how long has it been running so far", which can only
+    be answered against the current moment. A finished analysis needs
+    `_duration` instead — see its docstring for why the two must not be
+    conflated.
+    """
     started = analysis.created_at
     if started is None:
         return 0.0
@@ -152,13 +160,34 @@ def _elapsed(analysis: MeetingAnalysis) -> float:
     return max((datetime.now(timezone.utc) - started).total_seconds(), 0.0)
 
 
+def _duration(analysis: MeetingAnalysis) -> float:
+    """How long a finished analysis actually took, frozen at completion.
+
+    `updated_at` stops moving once the row stops changing, so this is exactly
+    the measurement `_samples` already uses for calibration. Using `_elapsed`
+    (now - created_at) here instead would report a number that keeps growing
+    the longer someone waits before asking — a analysis that took 8 minutes
+    would read as "94 minutes elapsed" if queried an hour and a half after it
+    finished, which is what an analysis queried well after completion showed
+    before this fix.
+    """
+    started, finished = analysis.created_at, analysis.updated_at
+    if started is None or finished is None:
+        return _elapsed(analysis)
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    if finished.tzinfo is None:
+        finished = finished.replace(tzinfo=timezone.utc)
+    return max((finished - started).total_seconds(), 0.0)
+
+
 def estimate_analysis(db: Session, analysis: MeetingAnalysis,
                       calibration: Calibration | None = None) -> dict:
     """Remaining seconds for one analysis, or None once it is no longer running."""
     calibration = calibration or calibrate(db)
     if analysis.status not in PENDING_STATUSES:
         return {"estimated_seconds_remaining": None, "estimated_total_seconds": None,
-                "elapsed_seconds": round(_elapsed(analysis), 1),
+                "elapsed_seconds": round(_duration(analysis), 1),
                 "calibration": describe(calibration)}
     total = calibration.seconds_for(analysis.total_chunks)
     remaining = total - _elapsed(analysis)

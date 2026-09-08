@@ -26,6 +26,7 @@ from src.app.services.llm_service import (
     generate_embedding,
 )
 from src.app.services.motive_rules import churn_motives, opportunity_motives
+from src.app.services.product_service import ground_products
 from src.app.services.scoring_service import (
     calculate_churn_risk,
     calculate_opportunity_score,
@@ -378,10 +379,12 @@ def _extract_source_facts(source_texts: list[str]) -> dict[str, list[str]]:
             facts[key].append(value)
             del facts[key][limit:]
 
-    if re.search(r"\b(?:TotoCRM|CRM|força de vendas)\b", all_text, re.I):
-        add("produto", "TotoCRM / CRM de automação de força de vendas", 3)
-    if re.search(r"\b(?:DataSuite|DataSoup|PD4000)\b", all_text, re.I):
-        add("produto", "Integração com ERP/DataSuite e PD4000", 3)
+    # Product used to be guessed here from a fixed keyword->name table (e.g. any
+    # mention of "CRM" became the literal string "TotoCRM / CRM de automação de
+    # força de vendas", whether or not that product was actually the one meant).
+    # That guess is gone: `produto` is now decided once per analysis by
+    # product_service.ground_products, against the real ai.products catalogue,
+    # in process_analysis_summaries. This function no longer names a product.
     for role in (
         "gestor", "gerente", "diretor", "especialista de vendas", "vendedores",
         "consultores", "representantes", "marketing", "infraestrutura", "TI",
@@ -634,6 +637,27 @@ def build_compact_final_summary(
     }
 
 
+def _product_grounding_query(summaries: list[dict], final_summary: dict) -> str:
+    """Text to search the catalogue with: PRODUTO-tagged chunk mentions first.
+
+    Those are short, targeted phrases the chunk step already flagged as
+    product-related — closer to what a catalogue name+description embedding
+    looks like than the full transcript would be. Falling back to the
+    free-text `produto` field covers a consolidation path that produced no
+    PRODUTO-tagged points at all.
+    """
+    mentions: list[str] = []
+    for summary in summaries:
+        for point in summary.get("pontos_chave", []):
+            if isinstance(point, str) and point.upper().startswith("PRODUTO:"):
+                fact = point.split(":", 1)[1].strip()
+                if fact and fact not in mentions:
+                    mentions.append(fact)
+    if mentions:
+        return "; ".join(mentions)
+    return "; ".join(final_summary.get("produto") or [])
+
+
 def iter_pending_summaries(chunks: list[MeetingChunk], concurrency: int):
     if concurrency not in (1, 2):
         raise ValueError("A concorrência de chunks deve ser 1 ou 2.")
@@ -816,6 +840,25 @@ def process_analysis_summaries(
             started_at = perf_counter()
             analysis.final_summary = consolidate_summaries(summaries)
             logger.info("analysis_id=%s consolidation_seconds=%.3f", analysis.id, perf_counter() - started_at)
+
+        if settings.product_grounding_enabled:
+            grounding_query = _product_grounding_query(summaries, analysis.final_summary)
+            # Nothing was said that even looks like a product: leave `produto`
+            # exactly as consolidation produced it (already `[]` in every real
+            # case, now that no hardcode guesses one from raw keywords) instead
+            # of spending an embedding call and an Ollama call on empty input.
+            if grounding_query.strip():
+                grounded_products = ground_products(
+                    db, grounding_query, settings.product_grounding_top_k
+                )
+                analysis.final_summary = {
+                    **analysis.final_summary, "produto": grounded_products,
+                }
+                logger.info(
+                    "analysis_id=%s product_grounding=true produtos=%s",
+                    analysis.id, grounded_products,
+                )
+
         analysis.final_summary = complete_missing_fields(
             analysis.final_summary, summaries
         )
