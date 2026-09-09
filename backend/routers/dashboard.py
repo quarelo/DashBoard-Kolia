@@ -75,6 +75,28 @@ def _clean_history(raw) -> list[dict]:
     return collapsed[-_MAX_HISTORY:]
 
 
+@router.get("/meetings/{analysis_id}/chat")
+def dashboard_meeting_chat_history(
+    analysis_id: UUID,
+    _user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    client: httpx.Client = Depends(get_ia_client),
+):
+    """A conversa guardada desta reunião, para a tela reabrir de onde parou."""
+    item = analysis_read.get_analysis(db, analysis_id)
+    if item is None:
+        raise HTTPException(404, "Análise não encontrada.")
+    try:
+        response = client.get(f"/analises/{analysis_id}/chat")
+    except httpx.HTTPError as error:
+        raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "Serviço de IA indisponível."}) from error
+    if response.status_code >= 500:
+        raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "A IA não respondeu. Tente novamente."})
+    if response.status_code == 404:
+        raise HTTPException(404, "Análise não encontrada na IA.")
+    return response.json()
+
+
 @router.post("/meetings/{analysis_id}/chat")
 def dashboard_meeting_chat(
     analysis_id: UUID,

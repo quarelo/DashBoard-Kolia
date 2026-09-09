@@ -143,7 +143,29 @@ export function Chat() {
     setAnalysisId(pick.analysisId);
     setMessages([greeting(pick.title)]);
     /* eslint-enable react-hooks/set-state-in-effect */
+    void loadConversation(pick.analysisId, pick.title);
   }, [options, analysisId, searchParams]);
+
+  // A conversa vive no servidor desde que o chat passou a gravá-la; sem isto ela
+  // continuaria morrendo a cada recarregamento de página, que era a queixa.
+  async function loadConversation(id: string, title: string) {
+    try {
+      const stored = await chatService.history(id);
+      if (stored.length === 0) return;
+      setMessages([
+        greeting(title),
+        ...stored.map((m) => ({
+          id: nextId(m.role === "user" ? "u" : "a"),
+          role: m.role,
+          content: m.content,
+          timestamp: m.created_at,
+          grounded: m.grounded ?? undefined,
+        })),
+      ]);
+    } catch {
+      // Conversa antiga indisponível não pode impedir uma pergunta nova.
+    }
+  }
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, busy]);
 
@@ -152,6 +174,7 @@ export function Chat() {
     setAnalysisId(id);
     setMessages(opt ? [greeting(opt.title)] : []);
     setInput("");
+    if (opt) void loadConversation(id, opt.title);
   }
 
   async function send(content: string) {
