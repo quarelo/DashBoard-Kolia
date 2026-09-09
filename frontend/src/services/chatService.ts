@@ -21,6 +21,14 @@ export interface ChatAnswer {
 
 type HistoryTurn = { role: "user" | "assistant"; content: string };
 
+export interface StoredMessage {
+  role: "user" | "assistant";
+  content: string;
+  grounded: boolean | null;
+  fallback_reason: string | null;
+  created_at: string;
+}
+
 export const fallbackMessages: Record<string, string> = {
   insufficient_evidence:
     "Não encontrei trechos suficientes nesta reunião para responder com segurança.",
@@ -36,6 +44,14 @@ export const chatService = {
     return items
       .filter((item) => item.status === "DONE")
       .map((item) => ({ analysisId: item.analysisId, title: item.title }));
+  },
+
+  // A conversa é guardada no servidor: recarregar a página não apaga mais nada.
+  async history(analysisId: string): Promise<StoredMessage[]> {
+    const { messages } = await apiRequest<{ messages: StoredMessage[] }>(
+      `/api/dashboard/meetings/${analysisId}/chat`,
+    );
+    return messages;
   },
 
   async ask(

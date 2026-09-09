@@ -918,3 +918,111 @@ def test_gap_question_is_not_read_as_a_product_listing():
     """A ordem das rotas decide: "o que falta no produto" é lacuna, não catálogo."""
     assert chat_service._summary_field_for("o que falta no produto?") == "gap_produto"
     assert chat_service._summary_field_for("Quais produtos foram citados?") == "produto"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Não encontri essa informação na transcribção desta reunião.",
+        "Não encontrei essa informação na transcriçao desta reunião.",
+        "Não há informação na transcrisão desta reunião.",
+    ],
+)
+def test_a_misspelled_refusal_is_still_a_refusal(monkeypatch, answer):
+    """Relatado em uso: a recusa com erro de grafia era servida com citação.
+
+    "Não encontri essa informação na transcribção desta reunião" não casava com
+    "transcricao", então escapava do detector e chegava ao leitor como resposta
+    fundamentada, com um trecho da reunião logo abaixo.
+    """
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [evidence("Boa tarde, a gente atua no varejo há 10 anos.")],
+        },
+    )
+    monkeypatch.setattr(chat_service, "generate_chat_answer", lambda _prompt: answer)
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("Qual era a cor do carro do cliente?")
+    )
+
+    assert result["answer"] == chat_service.UNKNOWN_ANSWER
+    assert result["citations"] == [], "uma recusa não pode vir com citação"
+    assert result["grounded"] is False
+    assert result["fallback_reason"] == "insufficient_evidence"
+
+
+@pytest.mark.parametrize(
+    ("model_answer", "expected"),
+    [
+        ("15", "15 lojas."),
+        ("15.", "15 lojas."),
+        ("São 15 lojas em São Paulo.", "São 15 lojas em São Paulo."),
+        ("15. Elas ficam em São Paulo.", "15 lojas. Elas ficam em São Paulo."),
+    ],
+)
+def test_quantity_anchor_does_not_repeat_the_bare_number(
+    monkeypatch, model_answer, expected
+):
+    """Medido em uso: "Quantas lojas o cliente tem?" devolveu "15 lojas. 15"."""
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [evidence("a gente atua no varejo há 10 anos, temos 15 lojas em são paulo")],
+        },
+    )
+    monkeypatch.setattr(chat_service, "generate_chat_answer", lambda _prompt: model_answer)
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("Quantas lojas o cliente tem?")
+    )
+
+    assert result["answer"] == expected
+
+
+def test_stored_conversation_is_sanitised_into_a_valid_history():
+    """Um turno pode falhar ao gravar; a conversa não pode quebrar a próxima pergunta.
+
+    `persist_turn` é tolerante de propósito — o usuário já tem a resposta na
+    tela —, então a conversa guardada pode ficar com dois `user` seguidos. O
+    schema exige começar em `user`, alternar e terminar em `assistant`, e um
+    corte cru viraria 422.
+    """
+    guardadas = [
+        SimpleNamespace(role="assistant", content="sobra de um turno anterior"),
+        SimpleNamespace(role="user", content="Quantas lojas?"),
+        SimpleNamespace(role="user", content="a resposta desta não gravou"),
+        SimpleNamespace(role="assistant", content="15 lojas."),
+        SimpleNamespace(role="user", content="Em que estado?"),
+    ]
+
+    history = chat_service.conversation_history(guardadas, limit=6)
+
+    assert [(m.role, m.content) for m in history] == [
+        ("user", "Quantas lojas?"),
+        ("assistant", "15 lojas."),
+    ]
+    # O contrato que o schema cobra, verificado aqui de forma explícita.
+    assert history[0].role == "user" and history[-1].role == "assistant"
+
+
+def test_conversation_history_keeps_only_the_most_recent_turns():
+    guardadas = []
+    for turno in range(5):
+        guardadas.append(SimpleNamespace(role="user", content=f"pergunta {turno}"))
+        guardadas.append(SimpleNamespace(role="assistant", content=f"resposta {turno}"))
+
+    history = chat_service.conversation_history(guardadas, limit=4)
+
+    assert [m.content for m in history] == [
+        "pergunta 3", "resposta 3", "pergunta 4", "resposta 4",
+    ]

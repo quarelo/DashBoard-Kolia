@@ -3,8 +3,8 @@ from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    Boolean, Computed, DateTime, ForeignKey, Index, Integer, Text,
-    UniqueConstraint, func,
+    BigInteger, Boolean, CheckConstraint, Computed, DateTime, ForeignKey,
+    Identity, Index, Integer, Text, UniqueConstraint, func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -104,3 +104,35 @@ class ChunkPassage(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     chunk: Mapped[MeetingChunk] = relationship(back_populates="passages")
+
+
+class ChatMessage(Base):
+    """Um turno da conversa sobre uma reunião.
+
+    Uma conversa por análise: o usuário escolhe a reunião e continua de onde
+    parou. Antes disto o histórico vivia só no payload que o navegador reenviava,
+    então recarregar a página apagava tudo.
+    """
+
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        CheckConstraint("role in ('user', 'assistant')",
+                        name="chat_messages_role_check"),
+        Index("chat_messages_analysis_seq_idx", "analysis_id", "seq"),
+        {"schema": "ai"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Ordem da conversa: `created_at` empata dentro de um mesmo commit, porque o
+    # `now()` do Postgres é o tempo da transação.
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(always=False))
+    analysis_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ai.meeting_analyses.id", ondelete="CASCADE"))
+    role: Mapped[str] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text)
+    # O veredito do servidor guardado junto da mensagem: sem ele, reabrir a
+    # conversa não distingue uma recusa de uma resposta.
+    grounded: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    fallback_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now())

@@ -4,11 +4,12 @@ import re
 import unicodedata
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.app.core.config import settings
-from src.app.models.analysis import MeetingAnalysis
-from src.app.schemas.analysis import ChatRequest
+from src.app.models.analysis import ChatMessage, MeetingAnalysis
+from src.app.schemas.analysis import ChatHistoryMessage, ChatRequest
 from src.app.services.llm_service import OllamaError, generate_chat_answer
 from src.app.services.rag_service import (
     excerpt_relevance_score,
@@ -36,8 +37,26 @@ _STOPWORDS = {
 }
 
 
+# Below this many content words a question cannot be searched on its own: "E qual
+# foi o motivo?" carries only {motivo}. At or above it, prepending the
+# conversation measurably destroys retrieval — "O CRM tem API aberta?" alone finds
+# passage 16, which says "o CRM tem plugin, ele tem API aberta", and with two turns
+# of history glued in front (21 characters becoming 143) it finds passage 19
+# instead; "Como importar leads para o CRM?" loses the passage about importing from
+# WhatsApp the same way.
+#
+# Three and not two, though the two groups overlap there: of the questions
+# measured, only "O que o cliente reclamou?" sits at 2 while self-contained, and it
+# routes to a consolidated field anyway, so history can only touch its citations —
+# while "Pode detalhar?" and "E depois disso?" also sit at 2 and are useless
+# without the previous turn.
+_SELF_CONTAINED_TERMS = 3
+
+
 def _search_query(request: ChatRequest) -> str:
     if not request.history:
+        return request.question
+    if len(_lexical_terms(request.question)) >= _SELF_CONTAINED_TERMS:
         return request.question
     recent = request.history[-2:]
     context = " ".join(message.content for message in recent)
@@ -405,8 +424,17 @@ def _numbers_are_supported(answer: str, evidence: list[dict]) -> bool:
 
 
 def _is_unknown_answer(answer: str) -> bool:
+    """The model refused, however it spelled it.
+
+    Matched on the stem and not on "transcricao", because this model misspells the
+    word it was told to copy: it produced "Não encontri essa informação na
+    transcribção desta reunião", which failed the exact match and was served to the
+    reader as a grounded answer — the refusal sentence with a citation attached
+    under it, since only this check routes to `_fallback`, where citations are
+    dropped. A typo should not turn a refusal into an answer.
+    """
     normalized = _normalized(answer)
-    return "transcricao" in normalized and (
+    return "transcri" in normalized and (
         "nao encont" in normalized
         or "nao ha informacao" in normalized
         or "informacao insuficiente" in normalized
@@ -508,6 +536,12 @@ def _apply_quantity_anchor(
             normalized_sentence,
         ):
             continue
+        # A sentence that is the bare number adds nothing to the anchor and reads
+        # as a stutter: asked "Quantas lojas o cliente tem?", the model answered
+        # "15" and the reader got "15 lojas. 15".
+        without_value = re.sub(rf"\b{re.escape(value)}\b", " ", sentence)
+        if not re.search(r"[\wÀ-ÿ]", without_value):
+            continue
         kept_sentences.append(sentence.strip())
     suffix = " ".join(sentence for sentence in kept_sentences if sentence)
     anchored = f"{value} {unit}."
@@ -580,6 +614,68 @@ def _reread_evidence(results: list[dict], question: str) -> list[dict]:
         scored.append((float(item["similarity"]) + relevance * 0.01, item))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [item for _score, item in scored[:_REREAD_EVIDENCE_COUNT]]
+
+
+def load_conversation(db: Session, analysis_id: UUID, limit: int = 200) -> list[ChatMessage]:
+    """A conversa desta reunião, do começo, em ordem."""
+    return list(
+        db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.analysis_id == analysis_id)
+            .order_by(ChatMessage.seq.asc())
+            .limit(limit)
+        ).scalars()
+    )
+
+
+def conversation_history(stored: list, limit: int) -> list[ChatHistoryMessage]:
+    """As últimas `limit` mensagens, no formato que `ChatRequest` aceita.
+
+    Saneado e não apenas fatiado, porque o schema exige começar em `user`,
+    alternar papéis e terminar em `assistant` — e a gravação de um turno pode
+    falhar sozinha (ela é deliberadamente tolerante, para não derrubar uma
+    resposta já entregue), deixando a conversa com dois `user` seguidos. Um
+    corte cru viraria 422 na próxima pergunta, isto é, a conversa guardada
+    quebrando o chat.
+    """
+    alternadas: list[ChatHistoryMessage] = []
+    for message in stored:
+        if alternadas and alternadas[-1].role == message.role:
+            continue
+        if not alternadas and message.role != "user":
+            continue
+        alternadas.append(
+            ChatHistoryMessage(role=message.role, content=message.content)
+        )
+    recentes = alternadas[-limit:]
+    while recentes and recentes[0].role != "user":
+        recentes = recentes[1:]
+    while recentes and recentes[-1].role != "assistant":
+        recentes = recentes[:-1]
+    return recentes
+
+
+def persist_turn(db: Session, analysis_id: UUID, question: str, result: dict) -> None:
+    """Guarda pergunta e resposta, e nunca derruba a resposta se a gravação falhar.
+
+    O usuário já tem a resposta na tela quando isto roda; perder o registro é
+    ruim, mas devolver 503 depois de ter respondido é pior.
+    """
+    try:
+        db.add_all([
+            ChatMessage(analysis_id=analysis_id, role="user", content=question),
+            ChatMessage(
+                analysis_id=analysis_id,
+                role="assistant",
+                content=result["answer"],
+                grounded=result["grounded"],
+                fallback_reason=result["fallback_reason"],
+            ),
+        ])
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("analysis_id=%s chat_persist=failed", analysis_id)
 
 
 def answer_analysis_question(

@@ -14,7 +14,7 @@ from src.app.schemas.analysis import (
     AnalysisDetailResponse, AnalyzeRequest, AnalyzeResponse, ChunkResponse,
     SemanticSearchRequest, SemanticSearchResponse,
     CategoryEvidenceResponse,
-    ChatRequest, ChatResponse,
+    ChatRequest, ChatResponse, ChatHistoryResponse,
 )
 from src.app.services.analysis_service import build_analysis_progress, prepare_analysis
 from src.app.services.llm_service import (
@@ -23,7 +23,15 @@ from src.app.services.llm_service import (
 from src.app.services.analysis_worker import AnalysisWorker
 from src.app.services.analysis_submission import SubmissionConflict, submit_idempotent
 from src.app.services.eta_service import estimate_analysis, estimate_backlog, estimate_batch
-from src.app.services.chat_service import answer_analysis_question
+from src.app.services.chat_service import (
+    answer_analysis_question, conversation_history, load_conversation,
+    persist_turn,
+)
+
+# Quantas mensagens do passado o modelo vê. Seis é o teto que ChatRequest já
+# aceitava quando o histórico vinha do navegador; com a conversa guardada, subir
+# isto é decisão de produto e de contexto, não mais de payload.
+_HISTORY_TURNS = 6
 from src.app.services.rag_service import (
     RagNotReadyError,
     search_analysis_categories,
@@ -229,6 +237,30 @@ def category_evidence(
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
+@app.get(
+    "/analises/{analysis_id}/chat",
+    response_model=ChatHistoryResponse,
+)
+def chat_history(
+    analysis_id: UUID,
+    db: Session = Depends(get_db),
+):
+    """A conversa desta reunião, para a tela reabrir de onde parou."""
+    return {
+        "analysis_id": analysis_id,
+        "messages": [
+            {
+                "role": message.role,
+                "content": message.content,
+                "grounded": message.grounded,
+                "fallback_reason": message.fallback_reason,
+                "created_at": message.created_at,
+            }
+            for message in load_conversation(db, analysis_id)
+        ],
+    }
+
+
 @app.post(
     "/analises/{analysis_id}/chat",
     response_model=ChatResponse,
@@ -239,7 +271,17 @@ def chat_with_analysis(
     db: Session = Depends(get_db),
 ):
     try:
-        return answer_analysis_question(db, analysis_id, payload)
+        # A conversa guardada é a fonte da verdade, não o que o cliente reenvia:
+        # antes disto o histórico morria ao recarregar a página, e dois clientes
+        # abertos na mesma reunião viam conversas diferentes.
+        stored = load_conversation(db, analysis_id)
+        if stored:
+            payload = payload.model_copy(update={
+                "history": conversation_history(stored, _HISTORY_TURNS)
+            })
+        result = answer_analysis_question(db, analysis_id, payload)
+        persist_turn(db, analysis_id, payload.question, result)
+        return result
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except RagNotReadyError as error:
