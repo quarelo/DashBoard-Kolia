@@ -1,4 +1,5 @@
 import jwt
+from datetime import datetime
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
 from uuid import UUID
@@ -207,9 +208,40 @@ def test_category_evidence_returns_grouped_semantic_context(monkeypatch):
     assert response.json()["categories"]["budget"][0]["chunk_index"] == 3
 
 
+class ChatSession:
+    """Sessão suficiente para o endpoint de chat, que agora lê e grava conversa.
+
+    `object()` bastava enquanto o endpoint só repassava para o serviço; desde
+    que a conversa passou a ser guardada, ele consulta o banco antes de
+    responder, e uma sessão sem `execute` viraria 503 mascarando o erro real.
+    """
+
+    def __init__(self, stored=()):
+        self._stored = list(stored)
+        self.saved = []
+
+    def execute(self, _statement):
+        stored = self._stored
+
+        class _Result:
+            def scalars(self):
+                return iter(stored)
+
+        return _Result()
+
+    def add_all(self, messages):
+        self.saved.extend(messages)
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+
 def test_chat_returns_grounded_answer_with_server_citations(monkeypatch):
     analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-    app.dependency_overrides[get_db] = lambda: object()
+    app.dependency_overrides[get_db] = lambda: ChatSession()
     monkeypatch.setattr(
         main,
         "answer_analysis_question",
@@ -248,7 +280,7 @@ def test_chat_returns_grounded_answer_with_server_citations(monkeypatch):
 
 def test_chat_returns_safe_http_200_fallback(monkeypatch):
     analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-    app.dependency_overrides[get_db] = lambda: object()
+    app.dependency_overrides[get_db] = lambda: ChatSession()
     monkeypatch.setattr(
         main,
         "answer_analysis_question",
@@ -275,7 +307,7 @@ def test_chat_returns_safe_http_200_fallback(monkeypatch):
 
 def test_chat_maps_missing_analysis_to_404(monkeypatch):
     analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-    app.dependency_overrides[get_db] = lambda: object()
+    app.dependency_overrides[get_db] = lambda: ChatSession()
     monkeypatch.setattr(
         main,
         "answer_analysis_question",
@@ -296,7 +328,7 @@ def test_chat_maps_missing_analysis_to_404(monkeypatch):
 
 def test_chat_maps_rag_not_ready_to_409(monkeypatch):
     analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-    app.dependency_overrides[get_db] = lambda: object()
+    app.dependency_overrides[get_db] = lambda: ChatSession()
     monkeypatch.setattr(
         main,
         "answer_analysis_question",
@@ -317,7 +349,7 @@ def test_chat_maps_rag_not_ready_to_409(monkeypatch):
 
 def test_chat_hides_unexpected_infrastructure_errors(monkeypatch):
     analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-    app.dependency_overrides[get_db] = lambda: object()
+    app.dependency_overrides[get_db] = lambda: ChatSession()
     monkeypatch.setattr(
         main,
         "answer_analysis_question",
@@ -347,3 +379,108 @@ def test_chat_rejects_invalid_history_before_database_access():
     )
 
     assert response.status_code == 422
+
+
+def test_chat_saves_the_turn_and_prefers_the_stored_conversation(monkeypatch):
+    """A conversa guardada manda, não o que o cliente reenvia.
+
+    Antes disto o histórico vivia só no payload do navegador: recarregar a
+    página apagava a conversa, e duas abas na mesma reunião divergiam.
+    """
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    guardadas = [
+        SimpleNamespace(role="user", content="Quantas lojas o cliente tem?",
+                        grounded=None, fallback_reason=None,
+                        created_at=datetime(2026, 9, 9, 12, 0)),
+        SimpleNamespace(role="assistant", content="15 lojas.",
+                        grounded=True, fallback_reason=None,
+                        created_at=datetime(2026, 9, 9, 12, 0, 5)),
+    ]
+    sessao = ChatSession(guardadas)
+    app.dependency_overrides[get_db] = lambda: sessao
+    visto = {}
+
+    def fake_answer(_db, current_id, payload):
+        visto["history"] = [(m.role, m.content) for m in payload.history]
+        return {
+            "analysis_id": current_id,
+            "answer": "São Paulo.",
+            "citations": [],
+            "grounded": True,
+            "fallback_reason": None,
+        }
+
+    monkeypatch.setattr(main, "answer_analysis_question", fake_answer)
+    try:
+        response = client.post(
+            f"/analises/{analysis_id}/chat",
+            json={"question": "Em que estado?", "history": [
+                {"role": "user", "content": "histórico que o cliente inventou"},
+                {"role": "assistant", "content": "resposta que o cliente inventou"},
+            ]},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert visto["history"] == [
+        ("user", "Quantas lojas o cliente tem?"),
+        ("assistant", "15 lojas."),
+    ], "o histórico do banco deve substituir o que o cliente mandou"
+    assert [(m.role, m.content) for m in sessao.saved] == [
+        ("user", "Em que estado?"),
+        ("assistant", "São Paulo."),
+    ]
+
+
+def test_chat_answers_even_when_saving_the_turn_fails(monkeypatch):
+    """O usuário já tem a resposta; perder o registro não pode virar 503."""
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+
+    class SessaoQuebrada(ChatSession):
+        def add_all(self, _messages):
+            raise RuntimeError("banco fora do ar")
+
+    app.dependency_overrides[get_db] = lambda: SessaoQuebrada()
+    monkeypatch.setattr(
+        main,
+        "answer_analysis_question",
+        lambda _db, current_id, _payload: {
+            "analysis_id": current_id,
+            "answer": "São Paulo.",
+            "citations": [],
+            "grounded": True,
+            "fallback_reason": None,
+        },
+    )
+    try:
+        response = client.post(
+            f"/analises/{analysis_id}/chat", json={"question": "Em que estado?"}
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "São Paulo."
+
+
+def test_chat_history_endpoint_returns_the_conversation():
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    guardadas = [
+        SimpleNamespace(role="user", content="Quantas lojas?",
+                        grounded=None, fallback_reason=None,
+                        created_at=datetime(2026, 9, 9, 12, 0)),
+        SimpleNamespace(role="assistant", content="15 lojas.",
+                        grounded=True, fallback_reason=None,
+                        created_at=datetime(2026, 9, 9, 12, 0, 5)),
+    ]
+    app.dependency_overrides[get_db] = lambda: ChatSession(guardadas)
+    try:
+        response = client.get(f"/analises/{analysis_id}/chat")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    corpo = response.json()
+    assert [m["content"] for m in corpo["messages"]] == ["Quantas lojas?", "15 lojas."]
+    assert corpo["messages"][1]["grounded"] is True
