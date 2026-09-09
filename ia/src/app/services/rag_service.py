@@ -43,6 +43,12 @@ def _excerpt_terms(text: str) -> set[str]:
 
 
 def excerpt_relevance_score(content: str, query: str) -> int:
+    # The query side keeps the framing words here, unlike `_lexical_query`.
+    # Removing them was tried and measured worse: the overlap that drives this
+    # rerank got so thin that "Quais produtos foram mencionados?" stopped
+    # selecting the passages about products at all (chunks 15 and 9 gave way to 7
+    # and 9, and the passage that lists product groups fell out of both). A weak
+    # signal with some noise beat a cleaner signal with almost nothing in it.
     query_terms = _excerpt_terms(query)
     content_terms = _excerpt_terms(content)
     overlap = len(query_terms & content_terms)
@@ -194,6 +200,21 @@ def _lexical_query(db: Session, analysis_id: UUID, query: str) -> str:
     The cut is measured against the analysis being searched, not a written list of
     stop words: a word that is generic here may be the whole point elsewhere, and
     a hand-kept vocabulary is exactly what this search is meant to avoid.
+
+    Framing words survive it — "gostaria de saber sobre quais produtos estão sendo
+    falados na reunião" keeps `gostaria | quai | sobre | produto | sendo | saber`,
+    since a word the asker supplied is rare in the meeting precisely because the
+    meeting is not about it. Two ways of removing them were measured and both were
+    worse, so the noise stays:
+
+    - A list of Portuguese framing words, cutting the query to `produto`, lost a
+      question that the noisy query had answered and dropped the passage listing
+      product groups out of "Quais produtos foram mencionados?" — 6 of 8 answered
+      against 7 of 8, with two refusals against one. One surviving term leaves
+      ts_rank nothing to order by; the noise was carrying some signal.
+    - Keeping only terms found in the semantically nearest passages cut nothing
+      here (framing words appear in any transcribed speech) and emptied the query
+      for "Quantas máquinas precisam ser substituídas?".
     """
     terms = [t for t in _excerpt_terms(query) if len(t) > 2]
     if not terms:

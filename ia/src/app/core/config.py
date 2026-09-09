@@ -63,10 +63,23 @@ class Settings(BaseSettings):
     ollama_read_timeout_retries: int = 1
     ollama_json_repair_enabled: bool = True
     chat_num_predict: int = 512
-    chat_temperature: float = 0.0
+    # Not 0: greedy decoding is what produced the one-word answers. Measured over
+    # five questions on an indexed meeting, 0.4 turned "Preço orçamentos" into "O
+    # cliente falou sobre preço." and "Produtos" into "Produtos: Estoque, BIP
+    # (Código de barra)", with the two questions that already answered well coming
+    # back word for word the same. The alternative tried in the same run — a
+    # worked example in the re-read prompt — made it refuse two of the five, with
+    # or without temperature.
+    chat_temperature: float = 0.4
     chat_context_length: int = 8192
     chat_similarity_threshold: float = 0.55
     chat_max_evidence_chars: int = 2000
+    # What the reader sees as proof, not what the model reads. The two were the
+    # same 2000 characters, which put a wall of transcript under a one-line answer;
+    # shrinking what the model reads is not an option, since three 700-character
+    # passages measured worse than one of 2000. The citation is re-cut around the
+    # answer's own words instead, and only for display.
+    chat_citation_chars: int = 350
     chat_generate_timeout_seconds: float = 120.0
     analysis_worker_concurrency: int = 1
     # Two concurrent chunk requests nearly halved the measured Ollama path on
