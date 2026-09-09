@@ -29,8 +29,20 @@ docker compose ps   # os cinco: postgres, ollama, ia-service, backend, frontend
 ```
 
 `./backend` e `./frontend` são bind mounts com reload, então editar no host já
-recarrega o container — subir à mão não adianta nada e quebra a rede. Os nomes
-dos serviços são os hostnames: o backend só acha a IA em `http://ia-service:3000`
+recarrega o container — subir à mão não adianta nada e quebra a rede. **`./ia`
+não é**: o Dockerfile copia o código, e só `./ia/logs` está montado. Editar
+`ia/` no host não muda nada no container até
+`docker compose up -d --build ia-service`.
+
+Isso falha calado. Uma imagem de 44h atrás continuou servindo o chat com um gate
+de retrieval que dois commits já tinham removido, e as respostas eram as da
+versão antiga; depois o banco compartilhado avançou para a migração `0006`, que
+não existia dentro da imagem, e o `ia-service` entrou em loop de restart
+(`Can't locate revision identified by '0006'`) — a partir daí toda mensagem do
+chat virou 503. `docker compose logs ia-service` mostra as duas coisas; a
+resposta do chat, nenhuma.
+
+Os nomes dos serviços são os hostnames: o backend só acha a IA em `http://ia-service:3000`
 e a IA só acha o Ollama em `http://ollama:11434`, nomes que existem apenas dentro
 de `kolia-network`.
 
