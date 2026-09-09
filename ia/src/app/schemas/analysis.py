@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -130,6 +131,19 @@ class ChatCitation(BaseModel):
     chunk_index: int
     excerpt: str
     similarity: float
+
+
+class ChatMessageOut(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+    grounded: bool | None = None
+    fallback_reason: str | None = None
+    created_at: datetime
+
+
+class ChatHistoryResponse(BaseModel):
+    analysis_id: UUID
+    messages: list[ChatMessageOut]
 
 
 class ChatResponse(BaseModel):
