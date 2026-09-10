@@ -9,6 +9,11 @@ class AnalyzeRequest(BaseModel):
     user_id: UUID | None = None
     title: str = Field(min_length=1)
     transcription: str = Field(min_length=1)
+    metadata: dict[str, str] | None = Field(
+        default=None,
+        description="Business context from the CSV (TP_RECURSO, NOME_SEGMENTO, etc.) "
+                    "injected into analysis prompts for richer insights.",
+    )
 
 
 class AnalyzeResponse(BaseModel):

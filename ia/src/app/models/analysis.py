@@ -40,6 +40,7 @@ class MeetingAnalysis(Base):
     summary_is_final: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false"
     )
+    source_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     chunks: Mapped[list["MeetingChunk"]] = relationship(back_populates="analysis", cascade="all, delete-orphan")
 
 
