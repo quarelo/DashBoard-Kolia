@@ -7,8 +7,6 @@ from src.app.services.scoring_service import (
     OpportunityMotive,
     calculate_churn_risk,
     calculate_opportunity_score,
-    infer_churn_motives,
-    infer_opportunity_motives,
 )
 
 
@@ -175,185 +173,11 @@ class TestOpportunityScoringDeterminism:
         assert result.motives == [OpportunityMotive.PEDIDO_EXPANSAO.value]
 
 
-class TestChurnMotiveInference:
-    """Test heuristic inference of churn motives from text."""
-
-    def test_infer_cancelation_threat(self):
-        """Text mentioning contract cancellation should infer AMEACA_CANCELAMENTO."""
-        test_cases = [
-            "Cliente ameaçou cancelar o contrato",
-            "Possibilidade de encerramento",
-            "Ameaça de rescisão",
-            "Vai cancelar se não houver melhoria",
-        ]
-        for text in test_cases:
-            motives = infer_churn_motives(text)
-            assert ChurnMotive.AMEACA_CANCELAMENTO.value in motives
-
-    def test_infer_explicit_dissatisfaction(self):
-        """Text with dissatisfaction keywords should infer INSATISFACAO_EXPLICITA."""
-        test_cases = [
-            "Cliente insatisfeito com o produto",
-            "Muito descontente com o resultado",
-            "Grande frustração com a solução",
-        ]
-        for text in test_cases:
-            motives = infer_churn_motives(text)
-            assert ChurnMotive.INSATISFACAO_EXPLICITA.value in motives
-
-    def test_infer_competitor_mention(self):
-        """Text mentioning alternatives should infer MENCAO_CONCORRENTE."""
-        test_cases = [
-            "Estão analisando a concorrência",
-            "Existe outra solução mais barata",
-            "Pensando em trocar de fornecedor",
-        ]
-        for text in test_cases:
-            motives = infer_churn_motives(text)
-            assert ChurnMotive.MENCAO_CONCORRENTE.value in motives
-
-    def test_infer_product_complaint(self):
-        """Text with product issues should infer RECLAMACAO_PRODUTO."""
-        test_cases = [
-            "Sistema muito lento",
-            "Muitos erros no cadastro",
-            "Falhas frequentes",
-        ]
-        for text in test_cases:
-            motives = infer_churn_motives(text)
-            assert ChurnMotive.RECLAMACAO_PRODUTO.value in motives
-
-    def test_infer_inactivity_prolonged(self):
-        """Text about potential loss should infer INATIVIDADE_PROLONGADA."""
-        # These are the real cases from production that failed before
-        test_cases = [
-            "Potencial de perda se os clientes não encontrarem valor",
-            "Potencial de não seguir com a proposta",
-            "Risco de não retornar se não ver resultado",
-            "Cliente pode deixar de usar o sistema",
-        ]
-        for text in test_cases:
-            motives = infer_churn_motives(text)
-            # At least INATIVIDADE_PROLONGADA should be identified
-            assert ChurnMotive.INATIVIDADE_PROLONGADA.value in motives
-
-    def test_infer_no_churn_motive(self):
-        """Text without churn signals should return empty list."""
-        text = "Cliente satisfeito com a apresentação"
-        motives = infer_churn_motives(text)
-        assert motives == []
-
-
-class TestOpportunityMotiveInference:
-    """Test heuristic inference of opportunity motives from text."""
-
-    def test_infer_expansion_request(self):
-        """Text about growth should infer PEDIDO_EXPANSAO."""
-        test_cases = [
-            "Quer expandir para novos usuários",
-            "Plano de crescimento com mais licenças",
-            "Adicionar mais módulos",
-        ]
-        for text in test_cases:
-            motives = infer_opportunity_motives(text)
-            assert OpportunityMotive.PEDIDO_EXPANSAO.value in motives
-
-    def test_infer_budget_mention(self):
-        """Text mentioning money should infer MENCAO_BUDGET."""
-        test_cases = [
-            "R$ 50 mil de investimento",
-            "Orçamento de 2 milhões",
-            "Custo unitário de R$ 100",
-        ]
-        for text in test_cases:
-            motives = infer_opportunity_motives(text)
-            assert OpportunityMotive.MENCAO_BUDGET.value in motives
-
-    def test_infer_timeline_defined(self):
-        """Text with dates/times should infer PRAZO_DEFINIDO."""
-        test_cases = [
-            "Implementar na segunda-feira",
-            "Até o final de junho",
-            "Próximo trimestre",
-            "Hoje mesmo começamos",
-        ]
-        for text in test_cases:
-            motives = infer_opportunity_motives(text)
-            assert OpportunityMotive.PRAZO_DEFINIDO.value in motives
-
-    def test_infer_new_module_interest(self):
-        """Text about new features should infer INTERESSE_NOVO_MODULO."""
-        test_cases = [
-            "Interessados no novo módulo de CRM",
-            "Precisa de integração com API",
-            "Upgrade para a versão premium",
-        ]
-        for text in test_cases:
-            motives = infer_opportunity_motives(text)
-            assert OpportunityMotive.INTERESSE_NOVO_MODULO.value in motives
-
-    def test_infer_customer_praise(self):
-        """Text with positive feedback should infer ELOGIO_CLIENTE."""
-        test_cases = [
-            "Adorou a apresentação",
-            "Excelente solução",
-            "Muito satisfeito com o resultado",
-        ]
-        for text in test_cases:
-            motives = infer_opportunity_motives(text)
-            assert OpportunityMotive.ELOGIO_CLIENTE.value in motives
-
-    def test_infer_no_opportunity_motive(self):
-        """Text without opportunity signals should return empty list."""
-        text = "Cliente apenas fez perguntas técnicas"
-        motives = infer_opportunity_motives(text)
-        assert motives == []
-
-
-class TestRealWorldCases:
-    """Test actual cases that failed in production."""
-
-    def test_potential_loss_now_scores_above_zero(self):
-        """
-        Production case: "Potencial de perda se os clientes não encontrarem valor"
-        should now be identified and produce score > 0.
-        """
-        text = "Potencial de perda se os clientes não encontrarem valor"
-        motives = infer_churn_motives(text)
-        result = calculate_churn_risk(motives)
-
-        # Should identify at least inactivity prolonged (10 points)
-        assert result.score > 0
-        assert ChurnMotive.INATIVIDADE_PROLONGADA.value in result.motives
-
-    def test_no_follow_up_now_scores_above_zero(self):
-        """
-        Production case: "Potencial de não seguir com a proposta"
-        should now be identified and produce score > 0.
-        """
-        text = "Potencial de não seguir com a proposta"
-        motives = infer_churn_motives(text)
-        result = calculate_churn_risk(motives)
-
-        # Should identify at least inactivity prolonged (10 points)
-        assert result.score > 0
-        assert ChurnMotive.INATIVIDADE_PROLONGADA.value in result.motives
-
-    def test_explicit_threat_still_works(self):
-        """Explicit threats like before should continue to work."""
-        text = "Cliente ameaçou cancelar o contrato"
-        motives = infer_churn_motives(text)
-        result = calculate_churn_risk(motives)
-
-        assert result.score == 50
-        assert ChurnMotive.AMEACA_CANCELAMENTO.value in result.motives
-
-
 class TestDeclaredCodesWinOverWording:
     """With a model that can classify, codes outrank wording.
 
-    Off by default on this host — see TestDeclaredCodesAreNotTrustedByDefault —
-    so these enable it explicitly to exercise the mechanism.
+    On in production since the move to qwen3.5:4b-q4_K_M; these still pin it on
+    so the mechanism is exercised whatever the environment says.
 
     In production 250 of 500 churn signals scored 0 because the wording
     ("Potencial de perda...") missed a regex vocabulary. A declared code carries
@@ -408,17 +232,24 @@ class TestDeclaredCodesWinOverWording:
         assert result["risco_churn"]["score"] == 0
 
 
-class TestDeclaredCodesAreNotTrustedByDefault:
-    """A small model given room enumerates the catalogue instead of choosing.
+class TestEnumeratedCodesNeverScore:
+    """A model given room enumerates the catalogue instead of choosing.
 
-    On the reference meeting it declared all five churn codes and all five
+    On the reference meeting a 1B declared all five churn codes and all five
     opportunity codes, turning a CRM demo into churn 100 where the rules said 30.
-    The catalogue stays in the prompt — removing it measured 2.3x slower — but
-    scoring reads the rules until a model that can classify is available.
+    That is why `trust_declared_motives` was off entirely.
+
+    It is on now, for a model that does classify, so the protection moved into
+    the scoring itself: a declaration covering the whole catalogue is dropped
+    and the rules decide. Pinned on rather than left ambient, because the
+    invariant has to hold in the configuration that actually trusts the model.
     """
 
-    def test_enumerated_codes_do_not_override_the_rules(self):
+    def test_enumerated_codes_do_not_override_the_rules(self, monkeypatch):
+        from src.app.core.config import settings
         from src.app.services.analysis_service import build_compact_final_summary
+
+        monkeypatch.setattr(settings, "trust_declared_motives", True)
 
         todos = ["AMEACA_CANCELAMENTO", "INSATISFACAO_EXPLICITA",
                  "MENCAO_CONCORRENTE", "RECLAMACAO_PRODUTO", "INATIVIDADE_PROLONGADA"]
@@ -428,6 +259,31 @@ class TestDeclaredCodesAreNotTrustedByDefault:
         result = build_compact_final_summary([summary], ["demonstração de CRM"])
 
         assert result["risco_churn"]["score"] == 0, "sem sinal real, não pontua"
+
+    def test_four_declared_codes_still_score(self, monkeypatch):
+        """The guard has to stop enumeration without swallowing a real reading.
+
+        Measured: on a transcript asking to expand to new stores with R$ 180 mil
+        approved and a close by next month, the model declared these four, and
+        all four were in the text.
+        """
+        from src.app.core.config import settings
+        from src.app.services.analysis_service import build_compact_final_summary
+
+        monkeypatch.setattr(settings, "trust_declared_motives", True)
+
+        summary = {
+            "pontos_chave": ["OPORTUNIDADE: querem ampliar para as novas lojas"],
+            "motivos_churn": [],
+            "motivos_oportunidade": [
+                "PEDIDO_EXPANSAO", "MENCAO_BUDGET", "PRAZO_DEFINIDO",
+                "INTERESSE_NOVO_MODULO",
+            ],
+        }
+
+        result = build_compact_final_summary([summary], ["origem"])
+
+        assert result["score_oportunidade"]["score"] == 100
 
     def test_a_score_and_its_reason_never_contradict(self):
         from src.app.services.analysis_service import build_compact_final_summary

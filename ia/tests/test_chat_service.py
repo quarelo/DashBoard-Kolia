@@ -1032,6 +1032,65 @@ def test_a_misspelled_refusal_is_still_a_refusal(monkeypatch, answer):
 
 
 @pytest.mark.parametrize(
+    "answer",
+    [
+        "Nenhuma evidência na transcrição menciona a opinião do cliente sobre ter "
+        "um fornecedor único.",
+        "Nenhum dos trechos trata sobre a situação em que o vendedor está sem "
+        "conexão ou falha de rede.",
+    ],
+)
+def test_a_refusal_worded_about_the_evidence_is_still_a_refusal(monkeypatch, answer):
+    """Medido com o qwen3.5:4b: as duas recusas saíram como resposta fundamentada.
+
+    Nenhuma usa os radicais que `_is_unknown_answer` procurava ("não encontrei",
+    "não há informação"), então chegavam ao leitor com citação embaixo.
+    """
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [evidence("A gente preza muito não ter vínculo com outro fornecedor.")],
+        },
+    )
+    monkeypatch.setattr(chat_service, "generate_chat_answer", lambda _prompt: answer)
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("O que o cliente acha de ter um fornecedor único?")
+    )
+
+    assert result["answer"] == chat_service.UNKNOWN_ANSWER
+    assert result["citations"] == []
+    assert result["grounded"] is False
+
+
+def test_a_negative_answer_about_the_meeting_is_not_a_refusal(monkeypatch):
+    """"Nenhum participante citou prazo" responde à pergunta; não é recusa."""
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [evidence("Ninguém falou de data de implantação, só de licenças.")],
+        },
+    )
+    answer = "Nenhum participante citou prazo de implantação na reunião."
+    monkeypatch.setattr(chat_service, "generate_chat_answer", lambda _prompt: answer)
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("Alguém citou prazo de implantação?")
+    )
+
+    assert result["answer"] == answer
+    assert result["grounded"] is True
+
+
+@pytest.mark.parametrize(
     ("model_answer", "expected"),
     [
         ("15", "15 lojas."),
