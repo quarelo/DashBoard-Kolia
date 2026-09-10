@@ -658,12 +658,19 @@ def _product_grounding_query(summaries: list[dict], final_summary: dict) -> str:
     return "; ".join(final_summary.get("produto") or [])
 
 
-def iter_pending_summaries(chunks: list[MeetingChunk], concurrency: int):
+def iter_pending_summaries(
+    chunks: list[MeetingChunk],
+    concurrency: int,
+    metadata_context: str | None = None,
+):
     if concurrency not in (1, 2):
         raise ValueError("A concorrência de chunks deve ser 1 ou 2.")
 
     def generate(chunk: MeetingChunk):
-        return generate_chunk_summary(chunk.clean_content or chunk.content)
+        return generate_chunk_summary(
+            chunk.clean_content or chunk.content,
+            metadata_context=metadata_context,
+        )
 
     if concurrency == 1:
         for chunk in chunks:
@@ -684,6 +691,32 @@ def iter_pending_summaries(chunks: list[MeetingChunk], concurrency: int):
 
 def build_single_chunk_final_summary(summary: dict) -> dict:
     return build_compact_final_summary([summary])
+
+
+# Fields that change how the IA interprets the transcription.
+_CONTEXT_LABELS: dict[str, str] = {
+    "TP_RECURSO": "Tipo de cliente",
+    "NOME_SEGMENTO": "Segmento de mercado",
+    "FAIXA_FATURAMENTO_CLIENTE_EC": "Faixa de faturamento",
+    "NOTA_NPS": "NPS do cliente",
+    "DURACAO_MEETING": "Duração da reunião",
+}
+
+
+def format_metadata_context(metadata: dict | None) -> str | None:
+    """Build a short text block the prompt can prepend for business context.
+
+    Returns None when there is nothing useful to inject, so callers skip the
+    block entirely and old analyses without metadata are not affected.
+    """
+    if not metadata:
+        return None
+    lines: list[str] = []
+    for key, label in _CONTEXT_LABELS.items():
+        value = metadata.get(key, "").strip()
+        if value:
+            lines.append(f"- {label}: {value}")
+    return "\n".join(lines) if lines else None
 
 
 def prepare_analysis(
@@ -713,6 +746,7 @@ def prepare_analysis(
         final_summary=build_preliminary_summary(compacted_transcription),
         summary_stage="PRELIMINARY",
         summary_is_final=False,
+        source_metadata=payload.metadata,
     )
     analysis.total_tokens = count_tokens(transcription)
     analysis.total_chunks = len(chunks)
@@ -774,6 +808,7 @@ def process_analysis_summaries(
         db.refresh(analysis)
 
         chunks = existing_chunks
+        metadata_context = format_metadata_context(analysis.source_metadata)
         pending = [chunk for chunk in chunks if chunk.chunk_summary is None]
         # Only the highest-signal chunks are worth an LLM call; the rest get the
         # deterministic summary below. Without this cap every chunk was sent, so a
@@ -786,7 +821,8 @@ def process_analysis_summaries(
         chunks_by_index = {chunk.chunk_index: chunk for chunk in chunks}
         started_at = perf_counter()
         for chunk_index, summary in iter_pending_summaries(
-            pending, settings.chunk_processing_concurrency
+            pending, settings.chunk_processing_concurrency,
+            metadata_context=metadata_context,
         ):
             current_chunk = chunks_by_index[chunk_index]
             current_chunk.chunk_summary = merge_deterministic_evidence(
@@ -838,7 +874,9 @@ def process_analysis_summaries(
             logger.info("analysis_id=%s single_chunk_consolidation=skipped", analysis.id)
         else:
             started_at = perf_counter()
-            analysis.final_summary = consolidate_summaries(summaries)
+            analysis.final_summary = consolidate_summaries(
+                summaries, metadata_context=metadata_context,
+            )
             logger.info("analysis_id=%s consolidation_seconds=%.3f", analysis.id, perf_counter() - started_at)
 
         if settings.product_grounding_enabled:
