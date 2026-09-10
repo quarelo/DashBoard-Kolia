@@ -94,11 +94,71 @@ def to_list_item(row: Any) -> dict:
     }
 
 
-def list_analyses(db: Session, offset: int, limit: int) -> dict:
-    total = db.execute(text("SELECT count(*) FROM ai.meeting_analyses")).scalar() or 0
+def _build_filters(
+    *,
+    uf: str | None = None,
+    segmento: str | None = None,
+    unidade: str | None = None,
+    formato: str | None = None,
+    cnae: str | None = None,
+    dt_meeting_from: str | None = None,
+    dt_meeting_to: str | None = None,
+) -> tuple[str, dict]:
+    """Build WHERE clauses and params for JSONB filters on core.meetings.source_metadata."""
+    clauses: list[str] = []
+    params: dict[str, str] = {}
+    if uf:
+        clauses.append("m.source_metadata->>'UF' = :uf")
+        params["uf"] = uf.upper()
+    if cnae:
+        clauses.append("m.source_metadata->>'CNAE' = :cnae")
+        params["cnae"] = cnae
+    if formato:
+        clauses.append("lower(m.source_metadata->>'FORMATO_MEETING') = lower(:formato)")
+        params["formato"] = formato
+    if segmento:
+        clauses.append("lower(m.source_metadata->>'NOME_SEGMENTO') LIKE :segmento")
+        params["segmento"] = f"%{segmento.lower()}%"
+    if unidade:
+        clauses.append("lower(m.source_metadata->>'NOME_UNIDADE') LIKE :unidade")
+        params["unidade"] = f"%{unidade.lower()}%"
+    if dt_meeting_from:
+        clauses.append("m.source_metadata->>'DT_MEETING' >= :dt_from")
+        params["dt_from"] = dt_meeting_from
+    if dt_meeting_to:
+        clauses.append("m.source_metadata->>'DT_MEETING' <= :dt_to")
+        params["dt_to"] = dt_meeting_to
+    where = (" AND " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+def list_analyses(
+    db: Session,
+    offset: int,
+    limit: int,
+    *,
+    uf: str | None = None,
+    segmento: str | None = None,
+    unidade: str | None = None,
+    formato: str | None = None,
+    cnae: str | None = None,
+    dt_meeting_from: str | None = None,
+    dt_meeting_to: str | None = None,
+) -> dict:
+    extra_where, params = _build_filters(
+        uf=uf, segmento=segmento, unidade=unidade, formato=formato,
+        cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+    )
+    # When filters target core.meetings columns the JOIN must match; rows
+    # without a linked meeting are excluded by any metadata filter.
+    count_query = "SELECT count(*) FROM ai.meeting_analyses a"
+    if extra_where:
+        count_query += " LEFT JOIN core.meetings m ON m.analysis_id = a.id WHERE 1=1" + extra_where
+    total = db.execute(text(count_query), params).scalar() or 0
     rows = db.execute(
-        text(_BASE_SELECT + " ORDER BY a.created_at DESC, a.id LIMIT :limit OFFSET :offset"),
-        {"limit": limit, "offset": offset},
+        text(_BASE_SELECT + (" WHERE 1=1" + extra_where if extra_where else "")
+             + " ORDER BY a.created_at DESC, a.id LIMIT :limit OFFSET :offset"),
+        {**params, "limit": limit, "offset": offset},
     ).all()
     return {
         "total": total,
@@ -122,8 +182,24 @@ def get_analysis(db: Session, analysis_id: UUID) -> dict | None:
     return item
 
 
-def overview(db: Session, recent_limit: int = 5) -> dict:
-    rows = db.execute(text(_BASE_SELECT)).all()
+def overview(
+    db: Session,
+    recent_limit: int = 5,
+    *,
+    uf: str | None = None,
+    segmento: str | None = None,
+    unidade: str | None = None,
+    formato: str | None = None,
+    cnae: str | None = None,
+    dt_meeting_from: str | None = None,
+    dt_meeting_to: str | None = None,
+) -> dict:
+    extra_where, params = _build_filters(
+        uf=uf, segmento=segmento, unidade=unidade, formato=formato,
+        cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+    )
+    query = _BASE_SELECT + ((" WHERE 1=1" + extra_where) if extra_where else "")
+    rows = db.execute(text(query), params).all()
     items = [to_list_item(row) for row in rows]
 
     sentiment_keys = ("positivo", "neutro", "negativo", "misto", "não identificado")
