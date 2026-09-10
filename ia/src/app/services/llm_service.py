@@ -190,7 +190,7 @@ def _extract_deterministic_chunk_points(text: str) -> list[str]:
         weekday = re.sub(r"\s*-\s*", "-", match.group(2).lower())
         if action:
             add("AÇÃO", f"{action} na {weekday}")
-    return points[:12]
+    return points
 
 
 def _extract_json_object(raw: str) -> dict[str, Any] | None:
@@ -534,11 +534,13 @@ apenas os códigos que o trecho sustenta. Listas vazias são a resposta correta
 quando não houver sinal; não force uma classificação.
 
 motivos_churn:
-  AMEACA_CANCELAMENTO    cliente fala em cancelar, encerrar ou rescindir
-  INSATISFACAO_EXPLICITA cliente demonstra insatisfação ou frustração
+  AMEACA_CANCELAMENTO    cliente diz que vai cancelar, encerrar, rescindir ou não renovar
+  INSATISFACAO_EXPLICITA cliente diz, com as próprias palavras, que está insatisfeito
   MENCAO_CONCORRENTE     cliente cita outro fornecedor ou alternativa
   RECLAMACAO_PRODUTO     cliente relata falha, erro ou limitação do produto
   INATIVIDADE_PROLONGADA cliente sem uso, sem compra ou sem retorno há tempo
+Avaliar um concorrente ou achar o preço dele menor é só MENCAO_CONCORRENTE: não é
+ameaça de cancelamento nem insatisfação, a menos que o cliente diga isso.
 
 motivos_oportunidade:
   PEDIDO_EXPANSAO        cliente pede ampliar contrato, licenças ou escopo
@@ -546,6 +548,26 @@ motivos_oportunidade:
   PRAZO_DEFINIDO         há data ou prazo concreto para decisão ou entrega
   INTERESSE_NOVO_MODULO  cliente demonstra interesse em produto ainda não usado
   ELOGIO_CLIENTE         cliente elogia produto, entrega ou atendimento
+
+"""
+
+
+# Named so the model (and MENCAO_CONCORRENTE in motive_rules.py) can recognize
+# a specific competitor instead of only the generic word "concorrente" — a
+# client saying "hoje usamos SAP" carries the same signal as "usamos um
+# concorrente", but only the second was previously detectable. Kept compact,
+# same shape as MOTIVE_CATALOGUE: one line per name, no prose, because the
+# chunk prompt already runs once per chunk (up to MAX_LLM_CHUNKS=15) and the
+# catalogue's own doc records that prompt bulk here has cost truncations before.
+COMPETITOR_CATALOGUE = """Concorrentes conhecidos da TOTVS, para reconhecer quando o cliente citar um
+nome específico em vez da palavra genérica "concorrente":
+
+  SAP                     multinacional alemã; S/4HANA em grandes contas, Business One em médias
+  Oracle                  multinacional americana; ERP para grandes contas, Oracle NetSuite em nuvem
+  Sankhya                 brasileira, médio/grande porte, forte em inteligência de negócios
+  Senior Sistemas         brasileira, ERP, logística e gestão de pessoas
+  Omie                    brasileira, nuvem, foco em pequenas e médias empresas
+  Microsoft Dynamics 365  solução global, integração de processos
 
 """
 
@@ -594,7 +616,7 @@ Preserve nomes, números e negações. Copie apenas ações explicitamente
 mencionadas; não crie novas ações. O trecho contém fatos relevantes: extraia pelo menos um
 deles. Não invente fatos.
 
-{motive_block}TRECHO:
+{motive_block}{COMPETITOR_CATALOGUE}TRECHO:
 {clean_content}"""
     summary = _generate_json(
         prompt,
@@ -610,9 +632,26 @@ deles. Não invente fatos.
         raise OllamaResponseError(
             "O modelo não retornou pontos-chave categorizados para o trecho."
         )
-    deterministic = _extract_deterministic_chunk_points(clean_content)
+    # Model points first: once the model classifies, the regex points measured
+    # worse and filled all 12 slots. The regex fills what is left, sales signals
+    # first and at most two per category: every "?" is a DÚVIDA to the regex, and
+    # uncapped it took 24 of 48 points on four chunks of the long meeting.
+    rank = {category: index for index, category in enumerate((
+        "CHURN", "BUDGET", "OPORTUNIDADE", "AÇÃO", "SENTIMENTO", "FEEDBACK",
+        "PROBLEMA", "EVIDÊNCIA", "DÚVIDA", "PRODUTO", "GAP", "PERSONA",
+    ))}
+    per_category: dict[str, int] = {}
+    deterministic = []
+    for point in sorted(
+        _extract_deterministic_chunk_points(clean_content),
+        key=lambda point: rank.get(point.split(":", 1)[0], len(rank)),
+    ):
+        category = point.split(":", 1)[0]
+        if per_category.get(category, 0) < 2:
+            per_category[category] = per_category.get(category, 0) + 1
+            deterministic.append(point)
     merged = []
-    for point in [*deterministic, *normalized["pontos_chave"]]:
+    for point in [*normalized["pontos_chave"], *deterministic]:
         if point not in merged:
             merged.append(point)
         if len(merged) == 12:
@@ -660,7 +699,7 @@ Quando não houver informação, use lista vazia, score 0, "não identificado" o
 identificado=false. Os resumos têm pontos prefixados por categoria, mas os
 rótulos podem estar errados: valide o sentido do texto antes de consolidar.
 
-RESUMOS PARCIAIS:
+{COMPETITOR_CATALOGUE}RESUMOS PARCIAIS:
 {summaries_json}"""
     return _generate_json(
         prompt,

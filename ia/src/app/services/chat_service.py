@@ -434,11 +434,24 @@ def _is_unknown_answer(answer: str) -> bool:
     dropped. A typo should not turn a refusal into an answer.
     """
     normalized = _normalized(answer)
+    if _EVIDENCE_REFUSAL.search(normalized):
+        return True
     return "transcri" in normalized and (
         "nao encont" in normalized
         or "nao ha informacao" in normalized
         or "informacao insuficiente" in normalized
     )
+
+
+# Refusals worded about the evidence rather than the meeting, which the stems
+# above miss. Measured with qwen3.5:4b-q4_K_M: "Nenhuma evidência na transcrição
+# menciona..." and "Nenhum dos trechos trata sobre..." were both served as grounded
+# answers with a citation attached. Anchored at the start and tied to the evidence
+# words, so "Nenhum participante citou prazo" stays an answer.
+_EVIDENCE_REFUSAL = re.compile(
+    r"^\W*(?:nenhum|nenhuma|nao ha|nao existe)\b[^.!?]{0,80}"
+    r"\b(?:trechos?|evidencias?|transcri\w*)\b"
+)
 
 
 # A copied question is caught unconditionally, at any length: a question is
@@ -449,9 +462,11 @@ def _is_unknown_answer(answer: str) -> bool:
 # because a short exact quote is often the most trustworthy kind of answer —
 # so a declarative copy only counts as a dump once it is both long (not a
 # one-sentence answer that happens to equal its evidence) and occupies most of
-# the excerpt it came from. Both numbers are provisional midpoints, not
-# measured lines: there is no production log of this failure yet to calibrate
-# against, only the shape of the two cases the test suite already fixes.
+# the excerpt it came from. Calibrated on 13 real generations over 12 retrieval
+# questions (qwen3.5:4b-q4_K_M, the 40k-token test meeting): the longest verbatim
+# span any answer copied was 47 characters, at most 23% of the answer, and no
+# answer sat whole inside an excerpt — both thresholds are well clear of
+# legitimate answers. That run produced no real dump to tighten them against.
 _VERBATIM_COPY_MIN_CHARS = 300
 _VERBATIM_COPY_RATIO = 0.5
 

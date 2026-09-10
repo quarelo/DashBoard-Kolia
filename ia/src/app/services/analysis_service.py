@@ -455,6 +455,25 @@ def _score_reason(score: int, signals: list[str], motives: list[str],
     return "; ".join(MOTIVE_LABELS.get(code, code) for code in dict.fromkeys(motives))
 
 
+# Declaring the whole five-code catalogue is enumeration, not classification: a
+# model with room to list will list. Measured on the reference meeting, a 1B
+# declared all five churn codes and turned a CRM demo into churn 100 where the
+# rules said 30 — which is why `trust_declared_motives` was off at all. Trusting
+# the declaration is only safe while it is still a choice, so a declaration that
+# covers the whole catalogue is dropped and scoring falls back to the rules.
+#
+# Five and not four, because four can be legitimate: on a transcript asking to
+# expand to new stores with R$ 180 mil approved and a close by next month,
+# qwen3.5:4b-q4_K_M declared PEDIDO_EXPANSAO, MENCAO_BUDGET, PRAZO_DEFINIDO and
+# INTERESSE_NOVO_MODULO, and all four were in the text.
+_MOTIVE_ENUMERATION_FLOOR = 5
+
+
+def _declared_unless_enumerated(codes: list[str]) -> list[str]:
+    unique = list(dict.fromkeys(codes))
+    return [] if len(unique) >= _MOTIVE_ENUMERATION_FLOOR else unique
+
+
 def build_compact_final_summary(
     chunk_summaries: list[dict], source_texts: list[str] | None = None
 ) -> dict:
@@ -512,10 +531,10 @@ def build_compact_final_summary(
     # Codes the model declared under the enum-constrained schema are authoritative:
     # they do not depend on how it worded the fact. Text inference stays only as a
     # fallback for summaries produced before the schema carried motives.
-    declared_churn = [
+    declared_churn = _declared_unless_enumerated([
         code for summary in chunk_summaries
         for code in (summary.get("motivos_churn") or [])
-    ] if settings.trust_declared_motives else []
+    ]) if settings.trust_declared_motives else []
     # Rules read the evidence text the model quoted, which is transcript wording,
     # rather than its paraphrase — and they refuse hypotheticals, so a prospect's
     # "e se não der certo?" no longer scores as a customer about to leave.
@@ -528,10 +547,10 @@ def build_compact_final_summary(
     # Calculate opportunity score using deterministic scoring
     opportunities = _select_critical_facts(grouped["OPORTUNIDADE"], 3)
 
-    declared_opportunity = [
+    declared_opportunity = _declared_unless_enumerated([
         code for summary in chunk_summaries
         for code in (summary.get("motivos_oportunidade") or [])
-    ] if settings.trust_declared_motives else []
+    ]) if settings.trust_declared_motives else []
     all_opportunity_motives = declared_opportunity or [
         code for fact in opportunities for code in opportunity_motives(fact)
     ]
@@ -840,6 +859,14 @@ def process_analysis_summaries(
             started_at = perf_counter()
             analysis.final_summary = consolidate_summaries(summaries)
             logger.info("analysis_id=%s consolidation_seconds=%.3f", analysis.id, perf_counter() - started_at)
+            # The model's own 0-100 has no fixed scale, and one-chunk meetings
+            # already score by the motive table (and its enumeration guard).
+            scored = build_compact_final_summary(summaries)
+            analysis.final_summary = {
+                **analysis.final_summary,
+                "risco_churn": scored["risco_churn"],
+                "score_oportunidade": scored["score_oportunidade"],
+            }
 
         if settings.product_grounding_enabled:
             grounding_query = _product_grounding_query(summaries, analysis.final_summary)
