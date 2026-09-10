@@ -441,25 +441,53 @@ def _is_unknown_answer(answer: str) -> bool:
     )
 
 
-def _is_question_echo(answer: str, evidence: list[dict]) -> bool:
-    """The model copied a question out of the transcript instead of answering.
+# A copied question is caught unconditionally, at any length: a question is
+# never a legitimate answer to another question, and the existing test suite
+# already measures a real case at 74% of the source passage. A copied
+# declarative span is different — test_empty_consolidated_field_falls_back
+# deliberately keeps a full, single-sentence excerpt as the served answer,
+# because a short exact quote is often the most trustworthy kind of answer —
+# so a declarative copy only counts as a dump once it is both long (not a
+# one-sentence answer that happens to equal its evidence) and occupies most of
+# the excerpt it came from. Both numbers are provisional midpoints, not
+# measured lines: there is no production log of this failure yet to calibrate
+# against, only the shape of the two cases the test suite already fixes.
+_VERBATIM_COPY_MIN_CHARS = 300
+_VERBATIM_COPY_RATIO = 0.5
 
-    Measured on an indexed meeting: "Quais produtos foram mencionados na reunião?"
-    came back as "Quais são os grupos de produtos que me geram mais oportunidades
-    aqui a nível de fechamento também e tipos de serviço?" — a verbatim span of
-    passage 16 — and was served as a grounded answer with a citation attached.
 
-    Copied verbatim and not merely question-shaped, because an answer may end in a
-    question it is reporting ("ninguém respondeu: como migrar sem parada?"), and
-    length alone does not separate the two: this echo is longer than the question
-    that produced it.
+def _is_verbatim_copy(answer: str, evidence: list[dict]) -> bool:
+    """The model returned transcript text instead of answering it.
+
+    Three shapes, all served as a grounded answer before this check existed:
+
+    - A copied question: "Quais produtos foram mencionados na reunião?" came
+      back as "Quais são os grupos de produtos que me geram mais oportunidades
+      aqui a nível de fechamento também e tipos de serviço?" — a verbatim span
+      of passage 16.
+    - A speaker tag surviving into the answer, e.g. "[L117]:" — never
+      legitimate in a synthesized sentence, regardless of length.
+    - A long declarative span copied wholesale: the model hands back most of
+      an evidence excerpt — several clauses of raw dialogue, not a sentence
+      answering the question — with no question mark to catch it on.
     """
     stripped = answer.strip()
-    if not stripped.endswith("?"):
-        return False
+    if _SPEAKER_TAG.search(stripped):
+        return True
     normalized_answer = " ".join(_normalized(stripped).split())
+    if not normalized_answer:
+        return False
+    is_question = stripped.endswith("?")
     for item in evidence:
-        if normalized_answer in " ".join(_normalized(item["excerpt"]).split()):
+        normalized_excerpt = " ".join(_normalized(item["excerpt"]).split())
+        if normalized_answer not in normalized_excerpt:
+            continue
+        if is_question:
+            return True
+        if (
+            len(normalized_answer) >= _VERBATIM_COPY_MIN_CHARS
+            and len(normalized_answer) >= _VERBATIM_COPY_RATIO * len(normalized_excerpt)
+        ):
             return True
     return False
 
@@ -482,8 +510,8 @@ def _is_too_short(answer: str) -> bool:
 
 
 def _is_non_answer(answer: str, evidence: list[dict]) -> bool:
-    """Nothing the reader can use: empty, a refusal, or a copied question."""
-    return not answer or _is_unknown_answer(answer) or _is_question_echo(answer, evidence)
+    """Nothing the reader can use: empty, a refusal, or copied transcript text."""
+    return not answer or _is_unknown_answer(answer) or _is_verbatim_copy(answer, evidence)
 
 
 def _deserves_another_reading(answer: str, evidence: list[dict]) -> bool:
@@ -787,6 +815,12 @@ def answer_analysis_question(
                 retried=True,
             )
         answer, evidence = retried
+    # Belt-and-suspenders: even an answer that survived _is_verbatim_copy (a
+    # short, legitimate quote) can still carry a speaker tag from mid-sentence,
+    # and a retried answer is served whatever it comes back as (see
+    # _deserves_another_reading). Stripped before the numbers check because a
+    # tag like "[L117]:" reads as the number 117 to _unsupported_numbers.
+    answer = _clean_summary_text(answer)
     if not _numbers_are_supported(answer, evidence):
         return _fallback(
             analysis_id,

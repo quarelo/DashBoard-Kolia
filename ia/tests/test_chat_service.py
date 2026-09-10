@@ -710,6 +710,80 @@ def test_answer_that_only_echoes_a_question_is_not_served_as_an_answer(monkeypat
     assert result["grounded"] is True
 
 
+def test_answer_that_copies_a_long_declarative_excerpt_is_not_served(monkeypatch):
+    """A copy doesn't need a question mark to be a copy.
+
+    `_is_question_echo` used to require the copy to end in "?"; a long
+    declarative span lifted verbatim from the excerpt slipped through and was
+    served as if it were a synthesized answer, with a citation underneath that
+    read as the same text repeated. Short verbatim quotes must stay valid (see
+    test_empty_consolidated_field_falls_back_to_retrieval below), so this one
+    needs to be long enough to look like a dump and not a complete short
+    answer that happens to equal its evidence.
+    """
+    excerpt = (
+        "Bom dia pessoal, vamos começar revisando o andamento do projeto de "
+        "migração para a nuvem, que segue dentro do prazo combinado com o "
+        "time de infraestrutura. Depois disso eu queria falar sobre o "
+        "suporte que ficou pendente da última semana, porque o cliente "
+        "reclamou que ainda não recebeu retorno sobre o chamado de "
+        "integração com o ERP."
+    )
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [evidence(excerpt, chunk_index=30)],
+        },
+    )
+    answers = iter([
+        excerpt,
+        "O suporte pendente da última semana ainda não foi resolvido.",
+    ])
+    monkeypatch.setattr(chat_service, "generate_chat_answer", lambda _prompt: next(answers))
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("O que ficou pendente do suporte?")
+    )
+
+    assert result["answer"] == "O suporte pendente da última semana ainda não foi resolvido."
+    assert result["grounded"] is True
+
+
+def test_speaker_tags_are_stripped_from_the_served_chat_answer(monkeypatch):
+    """A stray "[L117]:" reads as garbled to the user and as the number 117
+    to the unsupported-number check, so it must never reach either check or
+    the reader as-is."""
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [
+                evidence("[L117]: a gente vai revisar o contrato ainda este mês.")
+            ],
+        },
+    )
+    answers = iter([
+        "[L117]: a gente vai revisar o contrato ainda este mês.",
+        "O contrato será revisado ainda este mês.",
+    ])
+    monkeypatch.setattr(chat_service, "generate_chat_answer", lambda _prompt: next(answers))
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("O que vai acontecer com o contrato?")
+    )
+
+    assert "[L117]" not in result["answer"]
+    assert result["answer"] == "O contrato será revisado ainda este mês."
+    assert result["grounded"] is True
+
+
 def test_a_real_answer_ending_in_a_question_mark_is_kept(monkeypatch):
     """Only copied questions are rejected; one the answer itself raises stays."""
     monkeypatch.setattr(
