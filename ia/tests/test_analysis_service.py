@@ -237,6 +237,29 @@ def test_model_summary_is_enriched_with_deterministic_evidence():
     assert any("27 máquinas" in point for point in result["pontos_chave"])
 
 
+def test_evidence_that_is_not_in_the_transcript_is_dropped():
+    """Medido: 1 de 5 trechos da consolidação por LLM era paráfrase entre aspas.
+
+    A consolidação só vê resumos de chunk, então pode "citar" o que ela mesma
+    escreveu. Evidência que não se acha na transcrição não prova nada.
+    """
+    source = [
+        "[L67]: Isso que a gente preza muito, de não ter nenhum vínculo com outro "
+        "fornecedor. Fornecedor único, problema único."
+    ]
+    evidence = [
+        {"categoria": "literal", "insight": "i", "trecho":
+            "\"Isso que a gente preza muito, de não ter nenhum vínculo com outro fornecedor.\""},
+        {"categoria": "parafrase", "insight": "i", "trecho":
+            "\"O cliente elogia a capacidade da ferramenta de centralizar dados.\""},
+        {"categoria": "curta", "insight": "i", "trecho": "Fornecedor único"},
+    ]
+
+    kept = analysis_service._quoted_evidence(evidence, source)
+
+    assert [item["categoria"] for item in kept] == ["literal", "curta"]
+
+
 def test_prepare_analysis_persists_preliminary_summary():
     session = FakeSession()
     payload = AnalyzeRequest(
@@ -481,6 +504,9 @@ def test_summary_worker_honours_max_llm_chunks(monkeypatch):
     calls = []
 
     monkeypatch.setattr(settings, "max_llm_chunks", 1)
+    # The cap is under test, not consolidation: on the LLM path this test called
+    # Ollama for real, which passed inside compose and failed in CI.
+    monkeypatch.setattr(settings, "fast_deterministic_consolidation", True)
     monkeypatch.setattr(
         analysis_service,
         "generate_chunk_summary",

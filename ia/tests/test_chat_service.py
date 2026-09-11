@@ -601,6 +601,100 @@ def test_highest_similarity_passage_survives_the_lexical_reranking(monkeypatch):
     assert result["grounded"] is True
 
 
+def test_a_passage_only_lexical_search_found_still_reaches_the_model(monkeypatch):
+    """Medido: "fornecedor único" estava no chunk 1, achado só pela busca textual.
+
+    Trecho achado só pela busca textual chega com similarity 0.0, porque o
+    `_passage_search` só tem distância de cosseno para acerto vetorial, e o limiar
+    o descartava sem leitura. O modelo respondia pelo chunk 6 que os trechos não
+    falavam do assunto.
+    """
+    vector_hit = evidence(
+        "A gente usa EDI e templates de importação no dia a dia.",
+        similarity=0.66,
+        chunk_index=6,
+    )
+    lexical_hit = {
+        **evidence(
+            "Isso que a gente preza muito, de não ter nenhum vínculo com outro fornecedor.",
+            similarity=0.0,
+            chunk_index=1,
+        ),
+        "lexical_terms": ["fornecedor"],
+    }
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [vector_hit, lexical_hit],
+        },
+    )
+    captured = {}
+
+    def fake_generate(prompt):
+        captured["prompt"] = prompt
+        return "O cliente valoriza não ter vínculo com outro fornecedor."
+
+    monkeypatch.setattr(chat_service, "generate_chat_answer", fake_generate)
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("O que o cliente acha de ter um fornecedor único?")
+    )
+
+    assert "outro fornecedor" in captured["prompt"]
+    assert [citation["chunk_index"] for citation in result["citations"]] == [6, 1]
+    assert result["grounded"] is True
+
+
+def test_the_rarest_lexical_match_is_the_one_carried(monkeypatch):
+    """Medido: perguntado sobre ficar "sem conexão", os chunks 10 (similarity 0.704)
+    e 1 (0.657) falam disso, mas perderam o ranking para o 18, que não fala. A
+    segunda opinião só olhava abaixo do limiar e levou o 17, que também não fala.
+    """
+    vector_hit = {
+        **evidence("Quando o vendedor abre o aplicativo, acontece a consulta da carteira.",
+                   similarity=0.72, chunk_index=18),
+        "lexical_terms": ["acontece", "vendedor"],
+        "lexical_weight": 3.0,
+    }
+    weak = {
+        **evidence("Acontece muito de o vendedor esquecer o pedido aberto.",
+                   similarity=0.0, chunk_index=17),
+        "lexical_terms": ["acontece"],
+        "lexical_weight": 2.0,
+    }
+    rare = {
+        **evidence("Passo o dia numa região em que não tenho conexão e sincronizo depois.",
+                   similarity=0.60, chunk_index=10),
+        "lexical_terms": ["conexao"],
+        "lexical_weight": 41.0,
+    }
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [vector_hit, weak, rare],
+        },
+    )
+    monkeypatch.setattr(
+        chat_service,
+        "generate_chat_answer",
+        lambda _prompt: "Sem conexão, o vendedor trabalha offline e sincroniza depois.",
+    )
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("O que acontece quando o vendedor está sem conexão?")
+    )
+
+    assert [citation["chunk_index"] for citation in result["citations"]] == [18, 10]
+
+
 def test_refusal_is_retried_over_more_passages_before_giving_up(monkeypatch):
     """The user gets nothing if the retry is skipped, so it is worth one call.
 
@@ -1038,10 +1132,12 @@ def test_a_misspelled_refusal_is_still_a_refusal(monkeypatch, answer):
         "um fornecedor único.",
         "Nenhum dos trechos trata sobre a situação em que o vendedor está sem "
         "conexão ou falha de rede.",
+        "Os trechos não mencionam a opinião do cliente sobre ter um único "
+        "fornecedor; o foco da conversa está nas ferramentas de EDI.",
     ],
 )
 def test_a_refusal_worded_about_the_evidence_is_still_a_refusal(monkeypatch, answer):
-    """Medido com o qwen3.5:4b: as duas recusas saíram como resposta fundamentada.
+    """Medido com o qwen3.5:4b: as três recusas saíram como resposta fundamentada.
 
     Nenhuma usa os radicais que `_is_unknown_answer` procurava ("não encontrei",
     "não há informação"), então chegavam ao leitor com citação embaixo.
