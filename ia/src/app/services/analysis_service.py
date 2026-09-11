@@ -221,11 +221,47 @@ def merge_deterministic_evidence(summary: dict, text: str) -> dict:
     model_points = list(merged.get("pontos_chave", []))
     deterministic_points = build_deterministic_chunk_summary(text)["pontos_chave"]
     seen = {point.casefold() for point in model_points if isinstance(point, str)}
+    # Uncapped on purpose, though it reads as a flood (AÇÃO 151, EVIDÊNCIA 136,
+    # PROBLEMA 130 over the 21 chunks of the long test meeting): these are literal
+    # transcript sentences, and consolidation only sees summaries. Capped at two per
+    # category, the same model points consolidated into 1 literal quote of 4 and a
+    # budget of "R$ 84,00", a product price; uncapped, 4 of 5 and "não identificado".
     merged["pontos_chave"] = model_points + [
         point for point in deterministic_points
         if point.casefold() not in seen
     ]
     return merged
+
+
+def _quoted_evidence(evidence: list, source_texts: list[str]) -> list:
+    """Evidence whose `trecho` really is in the transcript.
+
+    The consolidation prompt asks for the literal passage, but that step only sees
+    chunk summaries, so the model can put a paraphrase in quotes. Measured on the
+    long test meeting: 4 of 5 trechos had every 5-word run in the transcript, and
+    one ("O cliente elogia a capacidade da ferramenta de centralizar dados...")
+    had none. Kept at half the runs, so a lightly trimmed quote still counts.
+    """
+    def words(text: str) -> list[str]:
+        text = re.sub(r"\[\s*(?:l|locutor)\s*\d+\s*\]\s*:?", " ", (text or "").lower())
+        return re.findall(r"\w+", text)
+
+    source = [word for text in source_texts for word in words(text)]
+    runs_in_source = {tuple(source[i:i + 5]) for i in range(len(source) - 4)}
+    joined_source = " ".join(source)
+    kept = []
+    for item in evidence or []:
+        if not isinstance(item, dict):
+            continue
+        quote = words(item.get("trecho", ""))
+        runs = [tuple(quote[i:i + 5]) for i in range(len(quote) - 4)]
+        if runs:
+            found = sum(run in runs_in_source for run in runs) >= len(runs) / 2
+        else:
+            found = bool(quote) and " ".join(quote) in joined_source
+        if found:
+            kept.append(item)
+    return kept
 
 
 def _select_critical_facts(facts: list[str], limit: int) -> list[str]:
@@ -866,6 +902,10 @@ def process_analysis_summaries(
                 **analysis.final_summary,
                 "risco_churn": scored["risco_churn"],
                 "score_oportunidade": scored["score_oportunidade"],
+                "evidencias": _quoted_evidence(
+                    analysis.final_summary.get("evidencias"),
+                    [chunk.content for chunk in chunks],
+                ),
             }
 
         if settings.product_grounding_enabled:
