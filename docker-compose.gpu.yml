@@ -1,0 +1,15 @@
+# GPU for Ollama. Enabled through COMPOSE_FILE in the root .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml
+# Kept out of docker-compose.yml because there the reservation makes
+# `docker compose up` fail on any machine without the NVIDIA runtime
+# ("could not select device driver nvidia"). Without this file Ollama runs on
+# CPU: it works, but a 21-chunk meeting measured ~20 min against ~5 on the GPU.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

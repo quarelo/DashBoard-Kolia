@@ -60,6 +60,28 @@ class TestChurnFiresOnRealSignals:
     def test_each_catalogue_code_has_a_working_trigger(self, sentence, expected):
         assert expected in churn_motives(sentence)
 
+    @pytest.mark.parametrize("sentence", [
+        "hoje a gente usa o SAP para isso",
+        "usamos o Oracle NetSuite na matriz",
+        "avaliamos a Sankhya também",
+        "fechamos com a Senior Sistemas ano passado",
+        "testamos a Omie antes de fechar com vocês",
+        "migramos do Dynamics para cá",
+    ])
+    def test_named_competitors_count_as_mencao_concorrente(self, sentence):
+        """A named competitor is the same signal as the generic word, just
+        undetectable by it — see COMPETITOR_CATALOGUE in llm_service.py."""
+        assert "MENCAO_CONCORRENTE" in churn_motives(sentence)
+
+    def test_senior_job_title_does_not_fire_as_the_competitor(self):
+        """"Sênior" is also the common adjective for a job title, and
+
+        normalize() strips the accent, collapsing it onto the same text as the
+        competitor's name — so only the full "Senior Sistemas" phrase can fire,
+        never the bare word.
+        """
+        assert churn_motives("o gerente sênior participou da reunião") == []
+
     def test_cancellation_threat_outweighs_a_complaint(self):
         threat = calculate_churn_risk(churn_motives("vamos rescindir o contrato")).score
         complaint = calculate_churn_risk(churn_motives("o sistema trava sempre")).score

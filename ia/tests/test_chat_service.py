@@ -601,6 +601,100 @@ def test_highest_similarity_passage_survives_the_lexical_reranking(monkeypatch):
     assert result["grounded"] is True
 
 
+def test_a_passage_only_lexical_search_found_still_reaches_the_model(monkeypatch):
+    """Medido: "fornecedor único" estava no chunk 1, achado só pela busca textual.
+
+    Trecho achado só pela busca textual chega com similarity 0.0, porque o
+    `_passage_search` só tem distância de cosseno para acerto vetorial, e o limiar
+    o descartava sem leitura. O modelo respondia pelo chunk 6 que os trechos não
+    falavam do assunto.
+    """
+    vector_hit = evidence(
+        "A gente usa EDI e templates de importação no dia a dia.",
+        similarity=0.66,
+        chunk_index=6,
+    )
+    lexical_hit = {
+        **evidence(
+            "Isso que a gente preza muito, de não ter nenhum vínculo com outro fornecedor.",
+            similarity=0.0,
+            chunk_index=1,
+        ),
+        "lexical_terms": ["fornecedor"],
+    }
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [vector_hit, lexical_hit],
+        },
+    )
+    captured = {}
+
+    def fake_generate(prompt):
+        captured["prompt"] = prompt
+        return "O cliente valoriza não ter vínculo com outro fornecedor."
+
+    monkeypatch.setattr(chat_service, "generate_chat_answer", fake_generate)
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("O que o cliente acha de ter um fornecedor único?")
+    )
+
+    assert "outro fornecedor" in captured["prompt"]
+    assert [citation["chunk_index"] for citation in result["citations"]] == [6, 1]
+    assert result["grounded"] is True
+
+
+def test_the_rarest_lexical_match_is_the_one_carried(monkeypatch):
+    """Medido: perguntado sobre ficar "sem conexão", os chunks 10 (similarity 0.704)
+    e 1 (0.657) falam disso, mas perderam o ranking para o 18, que não fala. A
+    segunda opinião só olhava abaixo do limiar e levou o 17, que também não fala.
+    """
+    vector_hit = {
+        **evidence("Quando o vendedor abre o aplicativo, acontece a consulta da carteira.",
+                   similarity=0.72, chunk_index=18),
+        "lexical_terms": ["acontece", "vendedor"],
+        "lexical_weight": 3.0,
+    }
+    weak = {
+        **evidence("Acontece muito de o vendedor esquecer o pedido aberto.",
+                   similarity=0.0, chunk_index=17),
+        "lexical_terms": ["acontece"],
+        "lexical_weight": 2.0,
+    }
+    rare = {
+        **evidence("Passo o dia numa região em que não tenho conexão e sincronizo depois.",
+                   similarity=0.60, chunk_index=10),
+        "lexical_terms": ["conexao"],
+        "lexical_weight": 41.0,
+    }
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [vector_hit, weak, rare],
+        },
+    )
+    monkeypatch.setattr(
+        chat_service,
+        "generate_chat_answer",
+        lambda _prompt: "Sem conexão, o vendedor trabalha offline e sincroniza depois.",
+    )
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("O que acontece quando o vendedor está sem conexão?")
+    )
+
+    assert [citation["chunk_index"] for citation in result["citations"]] == [18, 10]
+
+
 def test_refusal_is_retried_over_more_passages_before_giving_up(monkeypatch):
     """The user gets nothing if the retry is skipped, so it is worth one call.
 
@@ -707,6 +801,80 @@ def test_answer_that_only_echoes_a_question_is_not_served_as_an_answer(monkeypat
     )
 
     assert result["answer"] == "A reunião menciona o CRM e o Estoque."
+    assert result["grounded"] is True
+
+
+def test_answer_that_copies_a_long_declarative_excerpt_is_not_served(monkeypatch):
+    """A copy doesn't need a question mark to be a copy.
+
+    `_is_question_echo` used to require the copy to end in "?"; a long
+    declarative span lifted verbatim from the excerpt slipped through and was
+    served as if it were a synthesized answer, with a citation underneath that
+    read as the same text repeated. Short verbatim quotes must stay valid (see
+    test_empty_consolidated_field_falls_back_to_retrieval below), so this one
+    needs to be long enough to look like a dump and not a complete short
+    answer that happens to equal its evidence.
+    """
+    excerpt = (
+        "Bom dia pessoal, vamos começar revisando o andamento do projeto de "
+        "migração para a nuvem, que segue dentro do prazo combinado com o "
+        "time de infraestrutura. Depois disso eu queria falar sobre o "
+        "suporte que ficou pendente da última semana, porque o cliente "
+        "reclamou que ainda não recebeu retorno sobre o chamado de "
+        "integração com o ERP."
+    )
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [evidence(excerpt, chunk_index=30)],
+        },
+    )
+    answers = iter([
+        excerpt,
+        "O suporte pendente da última semana ainda não foi resolvido.",
+    ])
+    monkeypatch.setattr(chat_service, "generate_chat_answer", lambda _prompt: next(answers))
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("O que ficou pendente do suporte?")
+    )
+
+    assert result["answer"] == "O suporte pendente da última semana ainda não foi resolvido."
+    assert result["grounded"] is True
+
+
+def test_speaker_tags_are_stripped_from_the_served_chat_answer(monkeypatch):
+    """A stray "[L117]:" reads as garbled to the user and as the number 117
+    to the unsupported-number check, so it must never reach either check or
+    the reader as-is."""
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [
+                evidence("[L117]: a gente vai revisar o contrato ainda este mês.")
+            ],
+        },
+    )
+    answers = iter([
+        "[L117]: a gente vai revisar o contrato ainda este mês.",
+        "O contrato será revisado ainda este mês.",
+    ])
+    monkeypatch.setattr(chat_service, "generate_chat_answer", lambda _prompt: next(answers))
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("O que vai acontecer com o contrato?")
+    )
+
+    assert "[L117]" not in result["answer"]
+    assert result["answer"] == "O contrato será revisado ainda este mês."
     assert result["grounded"] is True
 
 
@@ -955,6 +1123,67 @@ def test_a_misspelled_refusal_is_still_a_refusal(monkeypatch, answer):
     assert result["citations"] == [], "uma recusa não pode vir com citação"
     assert result["grounded"] is False
     assert result["fallback_reason"] == "insufficient_evidence"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Nenhuma evidência na transcrição menciona a opinião do cliente sobre ter "
+        "um fornecedor único.",
+        "Nenhum dos trechos trata sobre a situação em que o vendedor está sem "
+        "conexão ou falha de rede.",
+        "Os trechos não mencionam a opinião do cliente sobre ter um único "
+        "fornecedor; o foco da conversa está nas ferramentas de EDI.",
+    ],
+)
+def test_a_refusal_worded_about_the_evidence_is_still_a_refusal(monkeypatch, answer):
+    """Medido com o qwen3.5:4b: as três recusas saíram como resposta fundamentada.
+
+    Nenhuma usa os radicais que `_is_unknown_answer` procurava ("não encontrei",
+    "não há informação"), então chegavam ao leitor com citação embaixo.
+    """
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [evidence("A gente preza muito não ter vínculo com outro fornecedor.")],
+        },
+    )
+    monkeypatch.setattr(chat_service, "generate_chat_answer", lambda _prompt: answer)
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("O que o cliente acha de ter um fornecedor único?")
+    )
+
+    assert result["answer"] == chat_service.UNKNOWN_ANSWER
+    assert result["citations"] == []
+    assert result["grounded"] is False
+
+
+def test_a_negative_answer_about_the_meeting_is_not_a_refusal(monkeypatch):
+    """"Nenhum participante citou prazo" responde à pergunta; não é recusa."""
+    monkeypatch.setattr(
+        chat_service,
+        "search_analysis_chunks",
+        lambda _db, analysis_id, query, top_k, excerpt_chars=700: {
+            "analysis_id": analysis_id,
+            "query": query,
+            "ready": True,
+            "results": [evidence("Ninguém falou de data de implantação, só de licenças.")],
+        },
+    )
+    answer = "Nenhum participante citou prazo de implantação na reunião."
+    monkeypatch.setattr(chat_service, "generate_chat_answer", lambda _prompt: answer)
+
+    result = chat_service.answer_analysis_question(
+        session(), ANALYSIS_ID, request("Alguém citou prazo de implantação?")
+    )
+
+    assert result["answer"] == answer
+    assert result["grounded"] is True
 
 
 @pytest.mark.parametrize(

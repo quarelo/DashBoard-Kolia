@@ -58,8 +58,16 @@ CHURN_RULES: dict[str, dict] = {
         "blockers": [],
     },
     ChurnMotive.MENCAO_CONCORRENTE.value: {
+        # Named competitors count the same as the generic word: a client saying
+        # "hoje usamos SAP" carries the same signal as "usamos um concorrente",
+        # but only the generic phrasing fired before. "senior sistemas" is the
+        # one that needs the full phrase — the bare word is also the common
+        # Portuguese adjective ("gerente sênior"), which normalize() collapses
+        # onto the same text and would otherwise fire on every senior job title.
         "triggers": [r"\bconcorren\w*", r"\boutro fornecedor", r"\boutra empresa",
-                     r"\bproposta d[ao] \w+ tambem", r"\bavaliando (?:outras|outra)"],
+                     r"\bproposta d[ao] \w+ tambem", r"\bavaliando (?:outras|outra)",
+                     r"\bsap\b", r"\boracle\b", r"\bsankhya\b", r"\bsenior sistemas\b",
+                     r"\bomie\b", r"\bdynamics\b"],
         "blockers": [],
     },
     ChurnMotive.RECLAMACAO_PRODUTO.value: {

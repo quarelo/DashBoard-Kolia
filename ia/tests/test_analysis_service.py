@@ -237,6 +237,29 @@ def test_model_summary_is_enriched_with_deterministic_evidence():
     assert any("27 máquinas" in point for point in result["pontos_chave"])
 
 
+def test_evidence_that_is_not_in_the_transcript_is_dropped():
+    """Medido: 1 de 5 trechos da consolidação por LLM era paráfrase entre aspas.
+
+    A consolidação só vê resumos de chunk, então pode "citar" o que ela mesma
+    escreveu. Evidência que não se acha na transcrição não prova nada.
+    """
+    source = [
+        "[L67]: Isso que a gente preza muito, de não ter nenhum vínculo com outro "
+        "fornecedor. Fornecedor único, problema único."
+    ]
+    evidence = [
+        {"categoria": "literal", "insight": "i", "trecho":
+            "\"Isso que a gente preza muito, de não ter nenhum vínculo com outro fornecedor.\""},
+        {"categoria": "parafrase", "insight": "i", "trecho":
+            "\"O cliente elogia a capacidade da ferramenta de centralizar dados.\""},
+        {"categoria": "curta", "insight": "i", "trecho": "Fornecedor único"},
+    ]
+
+    kept = analysis_service._quoted_evidence(evidence, source)
+
+    assert [item["categoria"] for item in kept] == ["literal", "curta"]
+
+
 def test_prepare_analysis_persists_preliminary_summary():
     session = FakeSession()
     payload = AnalyzeRequest(
@@ -481,6 +504,9 @@ def test_summary_worker_honours_max_llm_chunks(monkeypatch):
     calls = []
 
     monkeypatch.setattr(settings, "max_llm_chunks", 1)
+    # The cap is under test, not consolidation: on the LLM path this test called
+    # Ollama for real, which passed inside compose and failed in CI.
+    monkeypatch.setattr(settings, "fast_deterministic_consolidation", True)
     monkeypatch.setattr(
         analysis_service,
         "generate_chunk_summary",
@@ -818,7 +844,75 @@ def test_resume_summaries_skips_completed_chunks(monkeypatch):
     assert result.status == "DASHBOARD_READY"
     assert result.summary_attempt_started_at is not None
     assert result.summary_attempt_started_chunks == 1
-    assert result.final_summary == {"resumo_geral": "já pronto, chunk dois"}
+    assert result.final_summary["resumo_geral"] == "já pronto, chunk dois"
+
+
+def test_llm_consolidation_score_comes_from_the_motive_table(monkeypatch):
+    """One scale on the dashboard, whichever path built the summary.
+
+    One-chunk meetings score by the motive table; before this, multi-chunk ones
+    kept the model's free 0-100, which also bypassed the enumeration guard.
+    """
+    monkeypatch.setattr(settings, "fast_deterministic_consolidation", False)
+    monkeypatch.setattr(settings, "trust_declared_motives", True)
+    monkeypatch.setattr(settings, "product_grounding_enabled", False)
+    analysis_id = uuid4()
+    analysis = MeetingAnalysis(
+        id=analysis_id,
+        external_meeting_id=uuid4(),
+        title="Score",
+        status="ANALYZING",
+        total_tokens=4,
+        total_chunks=2,
+    )
+    summary = {
+        "pontos_chave": ["OPORTUNIDADE: querem ampliar para as novas lojas"],
+        "motivos_churn": [],
+        "motivos_oportunidade": ["PEDIDO_EXPANSAO"],
+    }
+    pending = MeetingChunk(
+        analysis_id=analysis_id,
+        external_meeting_id=analysis.external_meeting_id,
+        chunk_index=2,
+        token_count=2,
+        content="chunk dois",
+        clean_content="chunk dois",
+    )
+    session = FakeSession()
+    session.added.extend([
+        analysis,
+        MeetingChunk(
+            analysis_id=analysis_id,
+            external_meeting_id=analysis.external_meeting_id,
+            chunk_index=1,
+            token_count=2,
+            content="chunk um",
+            clean_content="chunk um",
+            chunk_summary=summary,
+        ),
+        pending,
+    ])
+    monkeypatch.setattr(
+        analysis_service, "generate_chunk_summary", lambda _text: dict(summary)
+    )
+    monkeypatch.setattr(
+        analysis_service,
+        "consolidate_summaries",
+        lambda _summaries: {
+            "resumo_geral": "consolidado pelo modelo",
+            "risco_churn": {"score": 90, "justificativa": "palpite do modelo"},
+            "score_oportunidade": {"score": 75, "justificativa": "palpite do modelo"},
+        },
+    )
+    monkeypatch.setattr(
+        analysis_service, "complete_missing_fields", lambda final, _chunks: final
+    )
+
+    result = analysis_service.process_analysis_summaries(session, analysis_id)
+
+    assert result.final_summary["resumo_geral"] == "consolidado pelo modelo"
+    assert result.final_summary["risco_churn"]["score"] == 0
+    assert result.final_summary["score_oportunidade"]["score"] == 40
 
 
 def test_resume_embeddings_skips_chunks_that_are_fully_indexed(monkeypatch):

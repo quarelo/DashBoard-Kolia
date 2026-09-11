@@ -1,0 +1,15 @@
+# LF in the working tree on every OS. The repo lives under /mnt/c and is touched
+# from both Windows and WSL; a checkout with CRLF left 169 files "modified" with no
+# content change, and turned the #!/bin/sh shebang of ia/install-model.sh into
+# "#!/bin/sh\r", which fails to execute (it broke tests/test_install_model.py).
+* text=auto eol=lf
+
+*.sh text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.xlsx binary
+*.pdf binary

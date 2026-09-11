@@ -221,11 +221,47 @@ def merge_deterministic_evidence(summary: dict, text: str) -> dict:
     model_points = list(merged.get("pontos_chave", []))
     deterministic_points = build_deterministic_chunk_summary(text)["pontos_chave"]
     seen = {point.casefold() for point in model_points if isinstance(point, str)}
+    # Uncapped on purpose, though it reads as a flood (AÇÃO 151, EVIDÊNCIA 136,
+    # PROBLEMA 130 over the 21 chunks of the long test meeting): these are literal
+    # transcript sentences, and consolidation only sees summaries. Capped at two per
+    # category, the same model points consolidated into 1 literal quote of 4 and a
+    # budget of "R$ 84,00", a product price; uncapped, 4 of 5 and "não identificado".
     merged["pontos_chave"] = model_points + [
         point for point in deterministic_points
         if point.casefold() not in seen
     ]
     return merged
+
+
+def _quoted_evidence(evidence: list, source_texts: list[str]) -> list:
+    """Evidence whose `trecho` really is in the transcript.
+
+    The consolidation prompt asks for the literal passage, but that step only sees
+    chunk summaries, so the model can put a paraphrase in quotes. Measured on the
+    long test meeting: 4 of 5 trechos had every 5-word run in the transcript, and
+    one ("O cliente elogia a capacidade da ferramenta de centralizar dados...")
+    had none. Kept at half the runs, so a lightly trimmed quote still counts.
+    """
+    def words(text: str) -> list[str]:
+        text = re.sub(r"\[\s*(?:l|locutor)\s*\d+\s*\]\s*:?", " ", (text or "").lower())
+        return re.findall(r"\w+", text)
+
+    source = [word for text in source_texts for word in words(text)]
+    runs_in_source = {tuple(source[i:i + 5]) for i in range(len(source) - 4)}
+    joined_source = " ".join(source)
+    kept = []
+    for item in evidence or []:
+        if not isinstance(item, dict):
+            continue
+        quote = words(item.get("trecho", ""))
+        runs = [tuple(quote[i:i + 5]) for i in range(len(quote) - 4)]
+        if runs:
+            found = sum(run in runs_in_source for run in runs) >= len(runs) / 2
+        else:
+            found = bool(quote) and " ".join(quote) in joined_source
+        if found:
+            kept.append(item)
+    return kept
 
 
 def _select_critical_facts(facts: list[str], limit: int) -> list[str]:
@@ -455,6 +491,25 @@ def _score_reason(score: int, signals: list[str], motives: list[str],
     return "; ".join(MOTIVE_LABELS.get(code, code) for code in dict.fromkeys(motives))
 
 
+# Declaring the whole five-code catalogue is enumeration, not classification: a
+# model with room to list will list. Measured on the reference meeting, a 1B
+# declared all five churn codes and turned a CRM demo into churn 100 where the
+# rules said 30 — which is why `trust_declared_motives` was off at all. Trusting
+# the declaration is only safe while it is still a choice, so a declaration that
+# covers the whole catalogue is dropped and scoring falls back to the rules.
+#
+# Five and not four, because four can be legitimate: on a transcript asking to
+# expand to new stores with R$ 180 mil approved and a close by next month,
+# qwen3.5:4b-q4_K_M declared PEDIDO_EXPANSAO, MENCAO_BUDGET, PRAZO_DEFINIDO and
+# INTERESSE_NOVO_MODULO, and all four were in the text.
+_MOTIVE_ENUMERATION_FLOOR = 5
+
+
+def _declared_unless_enumerated(codes: list[str]) -> list[str]:
+    unique = list(dict.fromkeys(codes))
+    return [] if len(unique) >= _MOTIVE_ENUMERATION_FLOOR else unique
+
+
 def build_compact_final_summary(
     chunk_summaries: list[dict], source_texts: list[str] | None = None
 ) -> dict:
@@ -512,10 +567,10 @@ def build_compact_final_summary(
     # Codes the model declared under the enum-constrained schema are authoritative:
     # they do not depend on how it worded the fact. Text inference stays only as a
     # fallback for summaries produced before the schema carried motives.
-    declared_churn = [
+    declared_churn = _declared_unless_enumerated([
         code for summary in chunk_summaries
         for code in (summary.get("motivos_churn") or [])
-    ] if settings.trust_declared_motives else []
+    ]) if settings.trust_declared_motives else []
     # Rules read the evidence text the model quoted, which is transcript wording,
     # rather than its paraphrase — and they refuse hypotheticals, so a prospect's
     # "e se não der certo?" no longer scores as a customer about to leave.
@@ -528,10 +583,10 @@ def build_compact_final_summary(
     # Calculate opportunity score using deterministic scoring
     opportunities = _select_critical_facts(grouped["OPORTUNIDADE"], 3)
 
-    declared_opportunity = [
+    declared_opportunity = _declared_unless_enumerated([
         code for summary in chunk_summaries
         for code in (summary.get("motivos_oportunidade") or [])
-    ] if settings.trust_declared_motives else []
+    ]) if settings.trust_declared_motives else []
     all_opportunity_motives = declared_opportunity or [
         code for fact in opportunities for code in opportunity_motives(fact)
     ]
@@ -878,6 +933,18 @@ def process_analysis_summaries(
                 summaries, metadata_context=metadata_context,
             )
             logger.info("analysis_id=%s consolidation_seconds=%.3f", analysis.id, perf_counter() - started_at)
+            # The model's own 0-100 has no fixed scale, and one-chunk meetings
+            # already score by the motive table (and its enumeration guard).
+            scored = build_compact_final_summary(summaries)
+            analysis.final_summary = {
+                **analysis.final_summary,
+                "risco_churn": scored["risco_churn"],
+                "score_oportunidade": scored["score_oportunidade"],
+                "evidencias": _quoted_evidence(
+                    analysis.final_summary.get("evidencias"),
+                    [chunk.content for chunk in chunks],
+                ),
+            }
 
         if settings.product_grounding_enabled:
             grounding_query = _product_grounding_query(summaries, analysis.final_summary)

@@ -267,6 +267,41 @@ def _summary_answer(db: Session, analysis_id: UUID, question: str) -> tuple[str,
     return (answer, field) if answer else None
 
 
+def _add_best_by_rare_term(
+    results: list[dict], selected: list[dict], limit: int
+) -> None:
+    """Carry the best passage only lexical search found, when it holds a rare term.
+
+    Such a passage has similarity 0.0 by construction — `_passage_search` has a
+    cosine distance only for vector hits — so the threshold used to drop it
+    unread. Measured: asked "O que o cliente acha de ter um fornecedor único?",
+    lexical search found chunk 1, where the client says "a gente preza muito não
+    ter nenhum vínculo com outro fornecedor", and the model answered from chunk 6
+    that the passages did not mention it.
+
+    Any unselected passage holding the rarest term, not only those below the
+    threshold. Asked about working "sem conexão", chunk 10 (similarity 0.704) and
+    chunk 1 (0.657) say it, but both lost the ranking to chunk 18, which does not;
+    looking only below the threshold carried chunk 17, which does not say it either.
+    """
+    if len(selected) >= limit:
+        return
+    selected_chunks = {item["chunk_index"] for item in selected}
+    candidates = [
+        result for result in results
+        if result.get("lexical_terms") and result["chunk_index"] not in selected_chunks
+    ]
+    if not candidates:
+        return
+    best = max(candidates, key=lambda result: float(result.get("lexical_weight", 0.0)))
+    selected.append({
+        "chunk_id": best["chunk_id"],
+        "chunk_index": best["chunk_index"],
+        "excerpt": best["excerpt"][:settings.chat_max_evidence_chars],
+        "similarity": best["similarity"],
+    })
+
+
 def _bounded_evidence(
     results: list[dict], question: str, limit: int
 ) -> list[dict]:
@@ -300,6 +335,7 @@ def _bounded_evidence(
             ):
                 selected.append(candidate)
     _add_best_by_similarity(accepted, selected, limit)
+    _add_best_by_rare_term(results, selected, limit)
     for item in selected:
         item.pop("_hybrid_score", None)
         item.pop("_lexical_matches", None)
@@ -374,7 +410,7 @@ def _build_prompt(request: ChatRequest, evidence: list[dict]) -> str:
         }
         for item in evidence
     ]
-    return f"""Você responde dúvidas sobre uma única reunião corporativa.
+    return f"""Você responde, sempre em português do Brasil, dúvidas sobre uma única reunião corporativa.
 Use SOMENTE os fatos presentes nas EVIDÊNCIAS. Não use conhecimento externo,
 não suponha e não complete lacunas. Se as evidências não responderem à pergunta,
 responda exatamente: {UNKNOWN_ANSWER}
@@ -434,6 +470,8 @@ def _is_unknown_answer(answer: str) -> bool:
     dropped. A typo should not turn a refusal into an answer.
     """
     normalized = _normalized(answer)
+    if _EVIDENCE_REFUSAL.search(normalized):
+        return True
     return "transcri" in normalized and (
         "nao encont" in normalized
         or "nao ha informacao" in normalized
@@ -441,25 +479,70 @@ def _is_unknown_answer(answer: str) -> bool:
     )
 
 
-def _is_question_echo(answer: str, evidence: list[dict]) -> bool:
-    """The model copied a question out of the transcript instead of answering.
+# Refusals worded about the evidence rather than the meeting, which the stems
+# above miss. Measured with qwen3.5:4b-q4_K_M, all served as grounded answers with
+# a citation attached: "Nenhuma evidência na transcrição menciona...", "Nenhum dos
+# trechos trata sobre...", "Os trechos não mencionam a opinião do cliente...".
+# Anchored at the start and tied to the evidence words, so "Nenhum participante
+# citou prazo" stays an answer.
+_EVIDENCE_REFUSAL = re.compile(
+    r"^\W*(?:"
+    r"(?:nenhum|nenhuma|nao ha|nao existe)\b[^.!?]{0,80}\b(?:trechos?|evidencias?|transcri\w*)\b"
+    r"|(?:os |as |a )?(?:trechos?|evidencias?|transcricao)\b[^.!?]{0,30}\bnao\s+"
+    r"(?:mencion|abord|trat|fal|cit|tra[zg]|inform|apresent|contem|respond)\w*"
+    r")"
+)
 
-    Measured on an indexed meeting: "Quais produtos foram mencionados na reunião?"
-    came back as "Quais são os grupos de produtos que me geram mais oportunidades
-    aqui a nível de fechamento também e tipos de serviço?" — a verbatim span of
-    passage 16 — and was served as a grounded answer with a citation attached.
 
-    Copied verbatim and not merely question-shaped, because an answer may end in a
-    question it is reporting ("ninguém respondeu: como migrar sem parada?"), and
-    length alone does not separate the two: this echo is longer than the question
-    that produced it.
+# A copied question is caught unconditionally, at any length: a question is
+# never a legitimate answer to another question, and the existing test suite
+# already measures a real case at 74% of the source passage. A copied
+# declarative span is different — test_empty_consolidated_field_falls_back
+# deliberately keeps a full, single-sentence excerpt as the served answer,
+# because a short exact quote is often the most trustworthy kind of answer —
+# so a declarative copy only counts as a dump once it is both long (not a
+# one-sentence answer that happens to equal its evidence) and occupies most of
+# the excerpt it came from. Calibrated on 13 real generations over 12 retrieval
+# questions (qwen3.5:4b-q4_K_M, the 40k-token test meeting): the longest verbatim
+# span any answer copied was 47 characters, at most 23% of the answer, and no
+# answer sat whole inside an excerpt — both thresholds are well clear of
+# legitimate answers. That run produced no real dump to tighten them against.
+_VERBATIM_COPY_MIN_CHARS = 300
+_VERBATIM_COPY_RATIO = 0.5
+
+
+def _is_verbatim_copy(answer: str, evidence: list[dict]) -> bool:
+    """The model returned transcript text instead of answering it.
+
+    Three shapes, all served as a grounded answer before this check existed:
+
+    - A copied question: "Quais produtos foram mencionados na reunião?" came
+      back as "Quais são os grupos de produtos que me geram mais oportunidades
+      aqui a nível de fechamento também e tipos de serviço?" — a verbatim span
+      of passage 16.
+    - A speaker tag surviving into the answer, e.g. "[L117]:" — never
+      legitimate in a synthesized sentence, regardless of length.
+    - A long declarative span copied wholesale: the model hands back most of
+      an evidence excerpt — several clauses of raw dialogue, not a sentence
+      answering the question — with no question mark to catch it on.
     """
     stripped = answer.strip()
-    if not stripped.endswith("?"):
-        return False
+    if _SPEAKER_TAG.search(stripped):
+        return True
     normalized_answer = " ".join(_normalized(stripped).split())
+    if not normalized_answer:
+        return False
+    is_question = stripped.endswith("?")
     for item in evidence:
-        if normalized_answer in " ".join(_normalized(item["excerpt"]).split()):
+        normalized_excerpt = " ".join(_normalized(item["excerpt"]).split())
+        if normalized_answer not in normalized_excerpt:
+            continue
+        if is_question:
+            return True
+        if (
+            len(normalized_answer) >= _VERBATIM_COPY_MIN_CHARS
+            and len(normalized_answer) >= _VERBATIM_COPY_RATIO * len(normalized_excerpt)
+        ):
             return True
     return False
 
@@ -482,8 +565,8 @@ def _is_too_short(answer: str) -> bool:
 
 
 def _is_non_answer(answer: str, evidence: list[dict]) -> bool:
-    """Nothing the reader can use: empty, a refusal, or a copied question."""
-    return not answer or _is_unknown_answer(answer) or _is_question_echo(answer, evidence)
+    """Nothing the reader can use: empty, a refusal, or copied transcript text."""
+    return not answer or _is_unknown_answer(answer) or _is_verbatim_copy(answer, evidence)
 
 
 def _deserves_another_reading(answer: str, evidence: list[dict]) -> bool:
@@ -787,6 +870,12 @@ def answer_analysis_question(
                 retried=True,
             )
         answer, evidence = retried
+    # Belt-and-suspenders: even an answer that survived _is_verbatim_copy (a
+    # short, legitimate quote) can still carry a speaker tag from mid-sentence,
+    # and a retried answer is served whatever it comes back as (see
+    # _deserves_another_reading). Stripped before the numbers check because a
+    # tag like "[L117]:" reads as the number 117 to _unsupported_numbers.
+    answer = _clean_summary_text(answer)
     if not _numbers_are_supported(answer, evidence):
         return _fallback(
             analysis_id,

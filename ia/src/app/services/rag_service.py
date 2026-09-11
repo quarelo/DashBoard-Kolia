@@ -216,29 +216,83 @@ def _lexical_query(db: Session, analysis_id: UUID, query: str) -> str:
       here (framing words appear in any transcribed speech) and emptied the query
       for "Quantas máquinas precisam ser substituídas?".
     """
-    terms = [t for t in _excerpt_terms(query) if len(t) > 2]
+    terms, _counts, _total = _discriminating_terms(db, analysis_id, query)
+    return " | ".join(search for search, _normalized in terms)
+
+
+def _query_terms(query: str) -> list[tuple[str, str]]:
+    """(search term, normalized term) for each word of the question worth searching.
+
+    The search term keeps the question's accents, because the tsvector is built
+    with to_tsvector('portuguese', content) and no unaccent: measured on the long
+    test meeting, "conexao" matched 0 of 123 passages where "conexão" matched 2,
+    and "orcamento" 0 where "orçamento" matched 33. Stripping accents first, as
+    this used to, silently dropped every accented word from lexical search. The
+    normalized term is what counting and in-memory matching use.
+    """
+    pairs, seen = [], set()
+    for token in re.findall(r"[^\W_]+", query.lower()):
+        normalized = _excerpt_terms(token)
+        if not normalized:
+            continue
+        term = next(iter(normalized))
+        if len(term) <= 2 or term in seen:
+            continue
+        seen.add(term)
+        pairs.append((token, term))
+    return pairs
+
+
+def _discriminating_terms(
+    db: Session, analysis_id: UUID, query: str
+) -> tuple[list[tuple[str, str]], dict[str, int], int]:
+    """The (search, normalized) terms `_lexical_query` searches, with how many
+    passages carry each normalized term and how many passages there are."""
+    terms = _query_terms(query)
     if not terms:
-        return ""
+        return [], {}, 0
     total = db.execute(
         select(func.count(ChunkPassage.id))
         .where(ChunkPassage.analysis_id == analysis_id)
     ).scalar_one() or 0
     if total < _MIN_PASSAGES_FOR_IDF:
-        return " | ".join(terms)
+        return terms, {}, total
 
-    discriminating = []
-    for term in terms:
+    counts = {}
+    kept = []
+    for search, normalized in terms:
         matches = db.execute(
             select(func.count(ChunkPassage.id)).where(
                 ChunkPassage.analysis_id == analysis_id,
                 ChunkPassage.search_vector.op("@@")(
-                    func.to_tsquery("portuguese", term)),
+                    func.to_tsquery("portuguese", search)),
             )
         ).scalar_one()
         if matches and matches <= total * _MAX_TERM_SHARE:
-            discriminating.append(term)
+            counts[normalized] = matches
+            kept.append((search, normalized))
     # Everything the person asked is common here; better a broad match than none.
-    return " | ".join(discriminating or terms)
+    return kept or terms, counts, total
+
+
+def _term_weight(term: str, counts: dict[str, int], total: int) -> float:
+    """A matched query term is worth total / passages carrying it."""
+    return total / counts[term] if counts.get(term) and total else 1.0
+
+
+def _rarity_order(hits: list, counts: dict[str, int], total: int) -> list:
+    """Lexical hits by how rare their matched terms are, not how often they repeat.
+
+    `hits` are (item, matched_terms, ts_rank). ts_rank counts occurrences, so a
+    passage repeating a common word of the question outranks one that says the
+    rare word once; here each matched term is worth `_term_weight`, and ts_rank
+    only breaks ties.
+    """
+    return [item for item, _terms, _rank in sorted(
+        hits,
+        key=lambda hit: (sum(_term_weight(t, counts, total) for t in hit[1]), hit[2]),
+        reverse=True,
+    )]
 
 
 def _fuse(vector_ids: list, lexical_ids: list) -> dict:
@@ -273,31 +327,49 @@ def _passage_search(db: Session, analysis_id: UUID, query: str,
     ).all()
 
     lexical_rows = []
-    tsquery = _lexical_query(db, analysis_id, query)
-    if tsquery:
+    matched = {}
+    terms, counts, total = _discriminating_terms(db, analysis_id, query)
+    if terms:
+        tsquery = " | ".join(search for search, _normalized in terms)
         rank = func.ts_rank(ChunkPassage.search_vector,
                             func.to_tsquery("portuguese", tsquery))
-        lexical_rows = db.execute(
+        # Every match, not the ts_rank top: the rarity order decides, and the
+        # passage that answers may be one ts_rank put last.
+        candidates = db.execute(
             select(ChunkPassage, MeetingChunk.chunk_index, rank.label("rank"))
             .join(MeetingChunk, MeetingChunk.id == ChunkPassage.chunk_id)
             .where(ChunkPassage.analysis_id == analysis_id,
                    ChunkPassage.search_vector.op("@@")(
                        func.to_tsquery("portuguese", tsquery)))
-            .order_by(rank.desc()).limit(depth)
+            .order_by(rank.desc())
         ).all()
+        wanted = {normalized for _search, normalized in terms}
+        hits = []
+        for passage, chunk_index, ts_rank in candidates:
+            found = _excerpt_terms(passage.content) & wanted
+            matched[passage.id] = (
+                tuple(sorted(found)),
+                sum(_term_weight(term, counts, total) for term in found),
+            )
+            hits.append(((passage, chunk_index), found, float(ts_rank)))
+        lexical_rows = _rarity_order(hits, counts, total)[:depth]
 
     by_id = {}
     similarity = {}
     for passage, chunk_index, cosine_distance in vector_rows:
         by_id[passage.id] = (passage, chunk_index)
         similarity[passage.id] = max(0.0, min(1.0, 1.0 - float(cosine_distance)))
-    for passage, chunk_index, _rank in lexical_rows:
+    for passage, chunk_index in lexical_rows:
         by_id.setdefault(passage.id, (passage, chunk_index))
 
     scores = _fuse([p.id for p, _c, _d in vector_rows],
-                   [p.id for p, _c, _r in lexical_rows])
+                   [p.id for p, _c in lexical_rows])
     ordered = sorted(scores, key=lambda pid: scores[pid], reverse=True)[:top_k]
-    return [(by_id[pid][0], by_id[pid][1], similarity.get(pid, 0.0)) for pid in ordered]
+    return [
+        (by_id[pid][0], by_id[pid][1], similarity.get(pid, 0.0),
+         matched.get(pid, ((), 0.0)))
+        for pid in ordered
+    ]
 
 
 def search_analysis_chunks(
@@ -340,13 +412,18 @@ def search_analysis_chunks(
     # names a price, where one vector averaged over a whole 2000-token chunk
     # cannot — asking about values used to return five chunks above the threshold
     # and none of the four that mention R$.
-    for passage, chunk_index, similarity in _passage_search(
+    for passage, chunk_index, similarity, (lexical_terms, lexical_weight) in _passage_search(
             db, analysis_id, query, query_embedding, top_k):
         results.append({
             "chunk_id": passage.chunk_id,
             "chunk_index": chunk_index,
             "excerpt": extract_relevant_excerpt(passage.content, query, excerpt_chars),
             "similarity": round(similarity, 4),
+            # Similarity is 0.0 for a passage only lexical search found; these
+            # terms, and how rare they are, are how the chat tells it apart from a
+            # vector miss and picks the one worth reading.
+            "lexical_terms": list(lexical_terms),
+            "lexical_weight": round(lexical_weight, 3),
         })
 
     if results:

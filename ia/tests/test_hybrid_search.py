@@ -51,3 +51,48 @@ class TestLexicalQuery:
 
     def test_a_question_with_nothing_searchable_yields_no_query(self, sqlite_db):
         assert _lexical_query(sqlite_db, None, "e o que?") == ""
+
+
+class TestAccents:
+    """The tsvector keeps accents, so the search term has to keep them too.
+
+    Measured: "conexao" matched 0 of 123 passages where "conexão" matched 2, and
+    "orcamento" 0 where "orçamento" matched 33.
+    """
+
+    def test_the_search_term_keeps_the_accent_and_the_count_key_drops_it(self):
+        from src.app.services.rag_service import _query_terms
+
+        assert ("conexão", "conexao") in _query_terms("O que acontece sem conexão?")
+
+    def test_the_lexical_query_searches_the_accented_word(self, sqlite_db):
+        assert "orçamento" in _lexical_query(sqlite_db, None, "qual o orçamento?")
+
+
+class TestRarityOrder:
+    """ts_rank counts repetitions; the passage that answers says the rare word once."""
+
+    def test_one_rare_term_outranks_a_repeated_common_one(self):
+        from src.app.services.rag_service import _rarity_order
+
+        hits = [
+            ("repete_acontece", {"acontece"}, 0.9),
+            ("fala_de_conexao", {"conexao"}, 0.1),
+        ]
+        ordered = _rarity_order(hits, counts={"acontece": 40, "conexao": 3}, total=120)
+
+        assert ordered == ["fala_de_conexao", "repete_acontece"]
+
+    def test_ts_rank_breaks_a_tie(self):
+        from src.app.services.rag_service import _rarity_order
+
+        hits = [("baixo", {"boleto"}, 0.1), ("alto", {"boleto"}, 0.5)]
+
+        assert _rarity_order(hits, counts={"boleto": 5}, total=100) == ["alto", "baixo"]
+
+    def test_without_counts_every_matched_term_weighs_the_same(self):
+        from src.app.services.rag_service import _rarity_order
+
+        hits = [("um", {"a"}, 0.9), ("dois", {"a", "b"}, 0.1)]
+
+        assert _rarity_order(hits, counts={}, total=5) == ["dois", "um"]
