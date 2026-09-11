@@ -67,13 +67,36 @@ def request_ia(client: httpx.Client, method: str, path: str, **kwargs) -> dict:
         raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "Serviço de IA indisponível. Tente novamente com a mesma reunião."}) from error
 
 
+# Metadata fields sent to the IA to enrich analysis prompts with business
+# context.  Everything else stays in source_metadata for dashboard filters but
+# does not reach the LLM.
+_ANALYSIS_CONTEXT_FIELDS = (
+    "TP_RECURSO", "NOME_SEGMENTO", "FAIXA_FATURAMENTO_CLIENTE_EC",
+    "NOTA_NPS", "DURACAO_MEETING",
+)
+
+
+def _analysis_metadata(meeting) -> dict[str, str] | None:
+    raw = meeting.source_metadata or {}
+    context = {
+        key: str(raw[key]).strip()
+        for key in _ANALYSIS_CONTEXT_FIELDS
+        if key in raw and str(raw[key]).strip()
+    }
+    return context or None
+
+
 def start_analysis(client: httpx.Client, meeting) -> dict:
     # Include the persistent internal ID: equal text in different meetings is not shared RAG context.
     key = hashlib.sha256(f"meeting-analysis-v1:{meeting.id}:{meeting.transcription_hash}".encode()).hexdigest()
     transcription = re.sub(r"\blocutor_(\d+)\b\s*:?\s*", r"[LOCUTOR \1]: ", meeting.transcription, flags=re.I)
-    result = request_ia(client, "POST", "/analisar", headers={"Idempotency-Key": key}, json={
+    payload = {
         "meeting_id": str(meeting.id), "title": meeting.title, "transcription": transcription,
-    })
+    }
+    metadata = _analysis_metadata(meeting)
+    if metadata:
+        payload["metadata"] = metadata
+    result = request_ia(client, "POST", "/analisar", headers={"Idempotency-Key": key}, json=payload)
     try:
         UUID(result["analysis_id"])
         if UUID(result["meeting_id"]) != meeting.id:

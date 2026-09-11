@@ -591,11 +591,22 @@ def chunk_num_predict(clean_content: str) -> int:
 
 
 def generate_chunk_summary(
-    clean_content: str, *, client: httpx.Client | None = None
+    clean_content: str,
+    *,
+    client: httpx.Client | None = None,
+    metadata_context: str | None = None,
 ) -> dict[str, Any]:
     motive_block = MOTIVE_CATALOGUE if settings.chunk_motive_classification else ""
+    context_block = (
+        f"\nCONTEXTO COMERCIAL DA REUNIÃO:\n{metadata_context}\n\n"
+        "Use este contexto para calibrar a análise: o tipo de cliente (lead vs.\n"
+        "customer) muda a lente (prospecção vs. retenção); o NPS baixo com menção\n"
+        "a concorrente é churn iminente; a faixa de faturamento indica o porte.\n"
+        "Não repita o contexto nos pontos_chave — ele serve como referência.\n"
+        if metadata_context else ""
+    )
     prompt = f"""Você é um especialista em análise de reuniões corporativas.
-Analise somente o trecho e retorne JSON apenas com pontos_chave. Diferencie
+{context_block}Analise somente o trecho e retorne JSON apenas com pontos_chave. Diferencie
 claramente o que é uma demonstração hipotética do vendedor do que é uma
 necessidade, opinião ou decisão real do cliente.
 Use no máximo 6 pontos curtos. Prefixe cada ponto com exatamente uma categoria
@@ -666,9 +677,20 @@ deles. Não invente fatos.
 
 
 def consolidate_summaries(
-    chunk_summaries: list[dict], *, client: httpx.Client | None = None
+    chunk_summaries: list[dict],
+    *,
+    client: httpx.Client | None = None,
+    metadata_context: str | None = None,
 ) -> dict[str, Any]:
     summaries_json = json.dumps(chunk_summaries, ensure_ascii=False)
+    context_block = (
+        f"\nCONTEXTO COMERCIAL DA REUNIÃO:\n{metadata_context}\n\n"
+        "Use este contexto ao consolidar: o tipo de cliente (lead vs. customer)\n"
+        "define se a reunião é prospecção ou retenção; o NPS influencia o peso\n"
+        "do risco de churn; a faixa de faturamento indica o porte do negócio.\n"
+        "Não repita esses dados nos campos — eles calibram sua interpretação.\n"
+        if metadata_context else ""
+    )
     prompt = f"""Você é um especialista sênior em análise de reuniões de venda
 B2B da TOTVS. Consolide os resumos parciais em um objeto JSON com exatamente
 as chaves do schema. Reconstrua a reunião, não apenas conte os rótulos.
@@ -676,8 +698,7 @@ Identifique produto TOTVS, persona profissional, sentimento geral do cliente,
 risco de churn (0-100), oportunidade comercial apenas para algo existente no
 portfólio, score da oportunidade (0-100), budget, gaps, problemas, feedback,
 evidências, recomendações e dúvidas em aberto.
-
-Regras obrigatórias:
+{context_block}Regras obrigatórias:
 - Produto e persona devem ser preenchidos quando houver qualquer evidência
   explícita nos resumos; não retorne lista vazia se houver CRM, vendedor,
   marketing, gestor, consultor, representante, TI ou infraestrutura.
