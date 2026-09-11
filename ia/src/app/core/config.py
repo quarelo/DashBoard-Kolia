@@ -37,8 +37,9 @@ class Settings(BaseSettings):
     # 192 was cheaper per call but truncated often, and a truncated JSON costs a
     # full retry at double the budget: measured over 10 real meetings, 192 spent
     # 140s with 3 retries against 97s and none at 256. Asking for more up front
-    # is the cheaper trade here.
-    ollama_chunk_num_predict: int = 256
+    # is the cheaper trade here. 384 since qwen3.5:4b-q4_K_M took over the chunk:
+    # it truncated at none of 256/384/512, and an unused budget costs nothing.
+    ollama_chunk_num_predict: int = 384
     # Ceiling for the per-chunk budget. Above 512 the extra tokens bought nothing
     # on real chunks (768 measured slower than 512 with the same retry count).
     ollama_chunk_num_predict_max: int = 512
@@ -46,17 +47,14 @@ class Settings(BaseSettings):
     # catalogue was 2.3x SLOWER (301s against 132s, 8 truncations against none).
     # The block seems to anchor the answer — without it the model rambles in
     # pontos_chave and overruns the budget, and each overrun costs a full retry.
-    # The 1B still returns no usable codes, so scoring runs on motive_rules.py.
     chunk_motive_classification: bool = True
-    # Whether the codes the model declares outrank the rules. Off: this 1B scored
-    # 3 of 6 on that judgement, and given room it enumerates the catalogue instead
-    # of choosing — on the reference meeting it declared all five churn codes and
-    # pushed a CRM demo to churn 100, against 30 from the rules. The catalogue
-    # stays in the prompt because removing it measured 2.3x slower; only the
-    # scoring stops believing it. Turn on with a model that can classify.
-    trust_declared_motives: bool = False
+    # Whether the codes the model declares outrank the rules. Off for a 1B that
+    # enumerated the catalogue instead of choosing (all five churn codes on a CRM
+    # demo: churn 100 against 30 from the rules). On for qwen3.5:4b-q4_K_M, with
+    # analysis_service dropping a declaration that covers all five codes.
+    trust_declared_motives: bool = True
     ollama_consolidation_think: bool = False
-    ollama_consolidation_num_predict: int = 384
+    ollama_consolidation_num_predict: int = 768
     ollama_keep_alive: str = "30m"
     ollama_generate_timeout_seconds: float = 600.0
     ollama_embedding_timeout_seconds: float = 120.0
@@ -71,7 +69,7 @@ class Settings(BaseSettings):
     # worked example in the re-read prompt — made it refuse two of the five, with
     # or without temperature.
     chat_temperature: float = 0.4
-    chat_context_length: int = 8192
+    chat_context_length: int = 32768
     chat_similarity_threshold: float = 0.55
     chat_max_evidence_chars: int = 2000
     # What the reader sees as proof, not what the model reads. The two were the
@@ -88,7 +86,9 @@ class Settings(BaseSettings):
     partial_chunk_count: int = 6
     max_llm_chunks: int = 15
     fast_transcription_retention_ratio: float = 0.05
-    fast_deterministic_consolidation: bool = True
+    # Off: the deterministic path wrote raw transcript into final_summary (budget
+    # with "[L67]:" speaker tags inside), which the chat then served as the answer.
+    fast_deterministic_consolidation: bool = False
     # One extra Ollama call per analysis (never per chunk): see
     # docs/product-catalog-grounding.md for why the granularity trade-off was
     # accepted for this host. Off falls back to whatever `produto` the
@@ -105,9 +105,9 @@ class Settings(BaseSettings):
     # one was, since that needs the model actually running on real meetings.
     product_grounding_confident_distance: float = 0.20
     product_grounding_plausible_distance: float = 0.45
-    model: str = Field(default="qwen2.5:3b", validation_alias=AliasChoices("MODEL", "OLLAMA_MODEL"))
-    chunk_model: str = Field(default="gemma3:1b", validation_alias=AliasChoices("CHUNK_MODEL", "OLLAMA_CHUNK_MODEL"))
-    consolidation_model: str = Field(default="gemma3:1b", validation_alias=AliasChoices("CONSOLIDATION_MODEL", "OLLAMA_CONSOLIDATION_MODEL"))
+    model: str = Field(default="qwen3.5:4b-q4_K_M", validation_alias=AliasChoices("MODEL", "OLLAMA_MODEL"))
+    chunk_model: str = Field(default="qwen3.5:4b-q4_K_M", validation_alias=AliasChoices("CHUNK_MODEL", "OLLAMA_CHUNK_MODEL"))
+    consolidation_model: str = Field(default="qwen3.5:4b-q4_K_M", validation_alias=AliasChoices("CONSOLIDATION_MODEL", "OLLAMA_CONSOLIDATION_MODEL"))
     embedding_model: str = "nomic-embed-text"
     # Seeds for the ETA fit before this host has finished any analysis.
     # Anchored on measured 1-chunk runs (~32s) and 48-chunk runs (~16s/chunk).
