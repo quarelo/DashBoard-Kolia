@@ -56,6 +56,23 @@ resolveria: falta o nome, não a porta.
 Para depurar um serviço isolado, use o ambiente do próprio container
 (`docker compose exec ia-service ...`) em vez de abrir um processo paralelo.
 
+### GPU
+
+O Ollama só usa a GPU quando o `docker-compose.gpu.yml` entra na conta. Nesta
+máquina isso vem do `.env`: `COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml`.
+A reserva ficou fora do `docker-compose.yml` porque faz o `docker compose up`
+falhar em máquina sem o runtime da NVIDIA ("could not select device driver
+nvidia"). Sem ela o Ollama roda em CPU sem avisar nada: a mesma reunião de 21
+chunks levou ~20 min, contra ~5 na GPU. Confira com
+`docker compose exec ollama nvidia-smi`.
+
+### Memória do host
+
+A máquina tem 7,7 GB de RAM, e o Ollama chega a 4 GB segurando modelo. Duas
+medições em lote foram mortas por falta de memória, e uma delas levou o resultado
+junto. Em script de medição: `OLLAMA_KEEP_ALIVE=20s`, uma chamada de LLM por vez,
+e resultado gravado a cada item, não só no fim.
+
 ## Configuração
 
 Existe **um** `.env`, na raiz, ao lado do `docker-compose.yml`. As configs dos dois
