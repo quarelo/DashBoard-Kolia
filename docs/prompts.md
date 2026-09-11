@@ -244,10 +244,15 @@ Reescrevê-las para rotear deu 4 de 8. O roteamento em produção é léxico,
 ## Onde ficam os parâmetros
 
 ```
-CHAT_TEMPERATURE=0.4          apenas o chat; todo o resto roda em 0
-CHAT_NUM_PREDICT=512          CHAT_CONTEXT_LENGTH=8192
-OLLAMA_CHUNK_NUM_PREDICT=256  teto 512, calibrado para o gemma3:1b
-OLLAMA_CONSOLIDATION_NUM_PREDICT=384
+OLLAMA_MODEL / OLLAMA_CHUNK_MODEL / OLLAMA_CONSOLIDATION_MODEL = qwen3.5:4b-q4_K_M
+OLLAMA_CONTEXT_LENGTH=32768   CHAT_CONTEXT_LENGTH=32768
+CHAT_TEMPERATURE              0.4 no config.py, 0.0 no docker-compose.yml — em
+                              container vale o do compose; todo o resto roda em 0
+CHAT_NUM_PREDICT=512
+OLLAMA_CHUNK_NUM_PREDICT=384  teto 512; 0 truncamentos em 256/384/512
+OLLAMA_CONSOLIDATION_NUM_PREDICT=768
+FAST_DETERMINISTIC_CONSOLIDATION=false
+TRUST_DECLARED_MOTIVES=true
 OLLAMA_THINK=True             mas os três caminhos JSON passam think=false
 ```
 
@@ -535,3 +540,121 @@ acrescenta sem limite os pontos de `build_deterministic_chunk_summary` a cada re
 de chunk, e os 6 chunks que ficam fora do limite de 15 recebem só esses pontos.
 Tudo isso entra no prompt da consolidação. Não foi medido se piora o resultado —
 só que existe e que infla a entrada da consolidação.
+
+---
+
+## Quarta rodada — 2026-09-10
+
+**A busca textual ignorava toda palavra acentuada.** `_lexical_query` tirava o
+acento dos termos da pergunta antes do `to_tsquery`, mas o `search_vector` é
+`to_tsvector('portuguese', content)`, sem `unaccent`. Na reunião longa, `conexao`
+casou 0 de 123 passagens e `conexão` casou 2; `orcamento` casou 0 e `orçamento`,
+33. Um termo que casa zero passagens era descartado como não discriminante, então
+preço, orçamento, integração e conexão nunca entraram na busca textual. Agora o
+termo vai com o acento da pergunta (`_query_terms`); a contagem e o casamento em
+memória continuam sem acento.
+
+**Trecho achado só pela busca textual era descartado sem ser lido.**
+`_passage_search` só tem similaridade para acerto vetorial: o que só a busca
+textual achou chegava com `similarity 0.0`, e o limiar de 0,55 descartava. O chat
+agora leva como segunda opinião o acerto textual de termo mais raro
+(`lexical_weight`). "O que o cliente acha de ter um fornecedor único?", recusada
+com o chunk 1 achado e jogado fora, passou a responder com evidência [6, 1]:
+*"O cliente considera a tendência de ter um único fornecedor como positiva, pois
+isso permite que tudo fique integrado e concentrado em uma única solução."*
+
+Os acertos textuais também passaram a ser ordenados pela raridade dos termos em
+vez de `ts_rank`, que conta repetição. Isso é raciocínio, não medição isolada: a
+pergunta sobre ficar "sem conexão" foi recuperada pela correção do acento, não
+pela ordenação.
+
+**Outra formulação de recusa.** *"Os trechos não mencionam a opinião do cliente
+sobre ter um único fornecedor..."* também saía como resposta fundamentada, com
+citação; entrou em `_EVIDENCE_REFUSAL`.
+
+**Catálogo carregado e grounding funcionando.** `python -m scraper.main` carregou
+302 produtos, sem falha, no banco local. A rodada ponta a ponta passou a devolver
+`produto: ["TOTVS Distribuição e Varejo - Linha Winthor", "TOTVS Backoffice -
+Linha Datasul"]`, antes `[]` por catálogo vazio. Não foi verificado se os dois
+estão certos para essa reunião; a linha Datasul é a mesma que
+`test_chat_service.py` usa como produto dela.
+
+**Casos de resposta conhecida para o score.** `ia/scripts/evaluate_motives.py`
+roda os 7 casos da terceira rodada e confere, por caso, os códigos que têm de
+aparecer e os que não podem: 7 de 7. Não é verdade de campo — transcrições e
+códigos esperados foram escritos à mão; a calibração de verdade precisa de
+reuniões rotuladas pelo time comercial.
+
+**Configuração e ambiente.**
+
+- Os padrões de `config.py`, `docker-compose.yml` e `.env.example` agora batem
+  com o que foi medido. Antes, quem subisse sem este `.env` pegava `gemma3:1b`,
+  contexto 8192 e consolidação determinística.
+- A reserva de GPU saiu do `docker-compose.yml` para o `docker-compose.gpu.yml`,
+  ativado por `COMPOSE_FILE` no `.env`: no arquivo principal ela fazia o
+  `docker compose up` falhar em máquina sem runtime NVIDIA. `docker compose config`
+  mostra um dispositivo NVIDIA com o override e nenhum sem ele.
+- 169 arquivos estavam "modificados" só por `\r` no fim da linha, e o shebang
+  `#!/bin/sh\r` fazia os três testes de `test_install_model.py` falharem com
+  `FileNotFoundError`. Um `.gitattributes` com `eol=lf` fixa o LF; os três passam.
+- `test_summary_worker_honours_max_llm_chunks` chamava o Ollama de verdade: passava
+  no compose, onde o container resolve o host `ollama`, e falhava na CI. Agora
+  prende a consolidação determinística, que é o que o teste pressupunha. A suíte
+  passa rodando das duas formas.
+
+**A "enxurrada" da regex é o que a consolidação cita — o limite foi revertido.**
+Na terceira rodada, `merge_deterministic_evidence` ganhou um limite de dois pontos
+por categoria, porque somava AÇÃO 151, EVIDÊNCIA 136 e PROBLEMA 130 nos 21
+chunks. A rodada ponta a ponta seguinte manteve só 1 evidência e voltou a errar o
+budget. A/B com os mesmos pontos do modelo, mudando só o limite:
+
+| | com limite | sem limite |
+|---|---|---|
+| `pontos_chave` | 368 | 571 |
+| entrada da consolidação | 54.265 caracteres | 77.293 |
+| evidências literais / geradas | 1 / 4 | 4 / 5 |
+| `budget.valor` | "R$ 84,00" (preço de item) | "não identificado", com os preços citados no contexto |
+
+As frases determinísticas são texto literal da transcrição, e a consolidação só
+lê resumos: sem elas, o modelo passa a "citar" o que ele mesmo escreveu. O limite
+saiu. O custo é ~42% a mais de entrada na consolidação, sem diferença de tempo
+total medida (287s com limite, 290s sem). O filtro de evidências
+(`_quoted_evidence`) ficou: com a entrada completa, ele descarta só a paráfrase
+("O cliente elogia a capacidade da ferramenta..."), e a cobertura medida é
+tudo-ou-nada — 0,0 ou 1,0 —, então o corte em metade não decide nenhum caso.
+
+**Rodada ponta a ponta final.** Com tudo em vigor — enxurrada sem limite,
+evidências verificadas, catálogo carregado e busca com acento —, na reunião de
+40.008 tokens e 21 chunks:
+
+| Métrica | Valor |
+|---|---|
+| status | DONE |
+| tempo total | 302,5s (resumos e consolidação 288,7 · embeddings 13,5) |
+| pico de VRAM | 5.838 de 8.192 MiB |
+| pico de RSS do processo | 89 MB |
+| `risco_churn` / `score_oportunidade` | 0 / 90 |
+| `produto` | TOTVS Distribuição e Varejo - Linha Winthor; TOTVS Backoffice - Linha Datasul |
+| `budget` | "não identificado" — R$ 84,00, R$ 11,63 e R$ 8,00 lidos como descontos e preços de itens |
+| evidências | 4, todas citação literal da transcrição |
+
+No chat, as 12 perguntas de recuperação sobre a mesma reunião foram todas
+respondidas. Antes da busca com acento e da segunda opinião por termo raro, duas
+delas eram recusas falsas, e uma dessas saía como resposta fundamentada.
+
+**A segunda opinião olha qualquer similaridade.** A primeira versão só considerava
+acertos textuais abaixo do limiar. Na pergunta sobre ficar "sem conexão", os
+chunks 10 (similarity 0,704) e 1 (0,657) têm a palavra, mas perdiam o ranking para
+o chunk 18, que não tem; a segunda opinião levava então o 17, que também não tem,
+e a resposta saía certa sem nenhuma citação que a sustentasse. Agora ela considera
+todo acerto textual de um chunk ainda não selecionado e fica com o de termo mais
+raro: evidência [18, 10], com o 10 contendo "conexão" e "sincroniz". Suítes com
+282 testes passando nas duas formas.
+
+Custo observado, não isolado: com uma passagem a mais na evidência, "Como o
+vendedor faz o input de itens hoje?" passou de *"precisa digitar manualmente os
+itens"* para *"pode importar listas de itens via CSV"*. A transcrição sustenta a
+primeira: o cliente pergunta como deixar de digitar o orçamento, e o CSV é recurso
+mostrado na demo. É a confusão entre demonstração e realidade do cliente que o
+prompt de chunk (#5) já tenta evitar, agora no chat. São 12 perguntas sem rótulo,
+então fica registrado como risco, não como taxa.
