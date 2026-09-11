@@ -104,13 +104,8 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # GPU reservation lives in docker-compose.gpu.yml: here it would make
+    # `docker compose up` fail on machines without the NVIDIA runtime.
     environment:
       OLLAMA_NUM_PARALLEL: 1
       # Kept at 1: raising it to 2 to hold gemma3 and nomic-embed together
