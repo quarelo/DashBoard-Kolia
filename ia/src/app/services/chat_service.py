@@ -267,6 +267,41 @@ def _summary_answer(db: Session, analysis_id: UUID, question: str) -> tuple[str,
     return (answer, field) if answer else None
 
 
+def _add_best_by_rare_term(
+    results: list[dict], selected: list[dict], limit: int
+) -> None:
+    """Carry the best passage only lexical search found, when it holds a rare term.
+
+    Such a passage has similarity 0.0 by construction — `_passage_search` has a
+    cosine distance only for vector hits — so the threshold used to drop it
+    unread. Measured: asked "O que o cliente acha de ter um fornecedor único?",
+    lexical search found chunk 1, where the client says "a gente preza muito não
+    ter nenhum vínculo com outro fornecedor", and the model answered from chunk 6
+    that the passages did not mention it.
+
+    Any unselected passage holding the rarest term, not only those below the
+    threshold. Asked about working "sem conexão", chunk 10 (similarity 0.704) and
+    chunk 1 (0.657) say it, but both lost the ranking to chunk 18, which does not;
+    looking only below the threshold carried chunk 17, which does not say it either.
+    """
+    if len(selected) >= limit:
+        return
+    selected_chunks = {item["chunk_index"] for item in selected}
+    candidates = [
+        result for result in results
+        if result.get("lexical_terms") and result["chunk_index"] not in selected_chunks
+    ]
+    if not candidates:
+        return
+    best = max(candidates, key=lambda result: float(result.get("lexical_weight", 0.0)))
+    selected.append({
+        "chunk_id": best["chunk_id"],
+        "chunk_index": best["chunk_index"],
+        "excerpt": best["excerpt"][:settings.chat_max_evidence_chars],
+        "similarity": best["similarity"],
+    })
+
+
 def _bounded_evidence(
     results: list[dict], question: str, limit: int
 ) -> list[dict]:
@@ -300,6 +335,7 @@ def _bounded_evidence(
             ):
                 selected.append(candidate)
     _add_best_by_similarity(accepted, selected, limit)
+    _add_best_by_rare_term(results, selected, limit)
     for item in selected:
         item.pop("_hybrid_score", None)
         item.pop("_lexical_matches", None)
@@ -374,7 +410,7 @@ def _build_prompt(request: ChatRequest, evidence: list[dict]) -> str:
         }
         for item in evidence
     ]
-    return f"""Você responde dúvidas sobre uma única reunião corporativa.
+    return f"""Você responde, sempre em português do Brasil, dúvidas sobre uma única reunião corporativa.
 Use SOMENTE os fatos presentes nas EVIDÊNCIAS. Não use conhecimento externo,
 não suponha e não complete lacunas. Se as evidências não responderem à pergunta,
 responda exatamente: {UNKNOWN_ANSWER}
@@ -444,13 +480,17 @@ def _is_unknown_answer(answer: str) -> bool:
 
 
 # Refusals worded about the evidence rather than the meeting, which the stems
-# above miss. Measured with qwen3.5:4b-q4_K_M: "Nenhuma evidência na transcrição
-# menciona..." and "Nenhum dos trechos trata sobre..." were both served as grounded
-# answers with a citation attached. Anchored at the start and tied to the evidence
-# words, so "Nenhum participante citou prazo" stays an answer.
+# above miss. Measured with qwen3.5:4b-q4_K_M, all served as grounded answers with
+# a citation attached: "Nenhuma evidência na transcrição menciona...", "Nenhum dos
+# trechos trata sobre...", "Os trechos não mencionam a opinião do cliente...".
+# Anchored at the start and tied to the evidence words, so "Nenhum participante
+# citou prazo" stays an answer.
 _EVIDENCE_REFUSAL = re.compile(
-    r"^\W*(?:nenhum|nenhuma|nao ha|nao existe)\b[^.!?]{0,80}"
-    r"\b(?:trechos?|evidencias?|transcri\w*)\b"
+    r"^\W*(?:"
+    r"(?:nenhum|nenhuma|nao ha|nao existe)\b[^.!?]{0,80}\b(?:trechos?|evidencias?|transcri\w*)\b"
+    r"|(?:os |as |a )?(?:trechos?|evidencias?|transcricao)\b[^.!?]{0,30}\bnao\s+"
+    r"(?:mencion|abord|trat|fal|cit|tra[zg]|inform|apresent|contem|respond)\w*"
+    r")"
 )
 
 
