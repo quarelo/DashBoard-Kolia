@@ -182,6 +182,52 @@ def get_analysis(db: Session, analysis_id: UUID) -> dict | None:
     return item
 
 
+def top_risk_and_opportunity(
+    db: Session,
+    limit: int = 5,
+    *,
+    uf: str | None = None,
+    segmento: str | None = None,
+    unidade: str | None = None,
+    formato: str | None = None,
+    cnae: str | None = None,
+    dt_meeting_from: str | None = None,
+    dt_meeting_to: str | None = None,
+) -> dict:
+    extra_where, params = _build_filters(
+        uf=uf, segmento=segmento, unidade=unidade, formato=formato,
+        cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+    )
+    done_filter = " WHERE a.summary_is_final = true"
+    if extra_where:
+        done_filter += extra_where
+    params["top_n"] = limit
+
+    risk_rows = db.execute(
+        text(
+            _BASE_SELECT + done_filter
+            + " ORDER BY (a.final_summary->'risco_churn'->>'score')::float DESC NULLS LAST"
+            + " LIMIT :top_n"
+        ),
+        params,
+    ).all()
+
+    opp_rows = db.execute(
+        text(
+            _BASE_SELECT + done_filter
+            + " ORDER BY (a.final_summary->'score_oportunidade'->>'score')::float DESC NULLS LAST"
+            + " LIMIT :top_n"
+        ),
+        params,
+    ).all()
+
+    return {
+        "limit": limit,
+        "top_churn_risk": [to_list_item(r) for r in risk_rows],
+        "top_opportunity": [to_list_item(r) for r in opp_rows],
+    }
+
+
 def overview(
     db: Session,
     recent_limit: int = 5,
