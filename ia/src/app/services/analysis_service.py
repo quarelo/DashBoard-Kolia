@@ -20,6 +20,8 @@ from src.app.services.chunk_service import (
     sanitize_transcription,
 )
 from src.app.services.llm_service import (
+    clean_card_items,
+    clean_open_questions,
     consolidate_summaries,
     complete_missing_fields,
     generate_chunk_summary,
@@ -179,13 +181,13 @@ def build_preliminary_summary(transcription: str) -> dict:
             "contexto": "Valores ou quantidades encontrados na transcrição." if quantified else "Não identificado.",
         },
         "gap_produto": [],
-        "problemas_identificados": problems,
+        "problemas_identificados": clean_card_items(problems),
         "feedback_produto": [],
         "evidencias": [
             {"categoria": "prévia", "insight": text, "trecho": text}
             for text in selected[:12]
         ],
-        "recomendacao_acao": actions,
+        "recomendacao_acao": clean_card_items(actions),
         "duvidas_em_aberto": [],
     }
 
@@ -658,7 +660,8 @@ def build_compact_final_summary(
                 churn_risk.score, churn_signals, all_churn_motives,
                 "Nenhum sinal explícito identificado."),
         },
-        "oportunidade_comercial": opportunities,
+        # The card during processing reads this too: no "[L66]:" in the middle.
+        "oportunidade_comercial": clean_card_items(opportunities),
         "score_oportunidade": {
             "score": opportunity_score.score,
             # Same rule as churn: the sentence has to come from whatever produced
@@ -675,20 +678,21 @@ def build_compact_final_summary(
             )),
             "contexto": "; ".join((source_facts.get("budget", []) or grouped["BUDGET"])[:3]) or "Não identificado.",
         },
-        "gap_produto": (
+        "gap_produto": clean_card_items((
             source_facts.get("gap", [])
             + [fact for fact in _select_critical_facts(grouped["GAP"], 3)
                if fact not in source_facts.get("gap", [])]
-        )[:3] or _select_critical_facts(grouped["GAP"], 3),
-        "problemas_identificados": (
+        )[:3] or _select_critical_facts(grouped["GAP"], 3)),
+        "problemas_identificados": clean_card_items((
             source_facts.get("problema", [])
             + [fact for fact in _select_critical_facts(grouped["PROBLEMA"], 3)
                if fact not in source_facts.get("problema", [])]
-        )[:3] or _select_critical_facts(grouped["PROBLEMA"], 3),
-        "feedback_produto": _select_critical_facts(grouped["FEEDBACK"], 3),
+        )[:3] or _select_critical_facts(grouped["PROBLEMA"], 3)),
+        "feedback_produto": clean_card_items(_select_critical_facts(grouped["FEEDBACK"], 3)),
         "evidencias": evidence,
-        "recomendacao_acao": _select_critical_facts(grouped["AÇÃO"], 3),
-        "duvidas_em_aberto": _select_critical_facts(grouped["DÚVIDA"], 3),
+        "recomendacao_acao": clean_card_items(_select_critical_facts(grouped["AÇÃO"], 3)),
+        "duvidas_em_aberto": _select_critical_facts(
+            clean_open_questions(grouped["DÚVIDA"]), 3),
     }
 
 
@@ -924,10 +928,10 @@ def process_analysis_summaries(
                 [chunk.clean_content or chunk.content for chunk in chunks],
             )
             logger.info("analysis_id=%s deterministic_consolidation=true", analysis.id)
-        elif len(summaries) == 1:
-            analysis.final_summary = build_single_chunk_final_summary(summaries[0])
-            logger.info("analysis_id=%s single_chunk_consolidation=skipped", analysis.id)
         else:
+            # One-chunk meetings too. Skipping consolidation left the regex's pick of
+            # "?" sentences as the open questions; reasoned open points need the
+            # model, and the extra consolidation call was accepted for that.
             started_at = perf_counter()
             analysis.final_summary = consolidate_summaries(
                 summaries, metadata_context=metadata_context,

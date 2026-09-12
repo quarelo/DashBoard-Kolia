@@ -72,6 +72,89 @@ def _valid_codes(values: Any, allowed: list[str]) -> list[str]:
     return seen
 
 
+_SPEAKER_TAG = re.compile(r"\[\s*(?:l|locutor)\s*\d+\s*\]\s*:?\s*", re.IGNORECASE)
+_CATEGORY_PREFIX = re.compile(
+    r"^\s*(?:" + "|".join(sorted(_CHUNK_CATEGORIES | set(_CHUNK_CATEGORY_ALIASES),
+                                 key=len, reverse=True)) + r")\s*:\s*",
+    re.IGNORECASE,
+)
+_GREETING = re.compile(
+    r"\b(?:tudo\s+(?:bem|bom|certo|joia)|beleza|bom\s+dia|boa\s+(?:tarde|noite)|"
+    r"ol[aá]|oi|bem[- ]vind[oa]s?|me\s+ouve[m]?|consegue[m]?\s+me\s+(?:ouvir|ver))\b",
+    re.IGNORECASE,
+)
+_CONFIRMATION_TAIL = re.compile(
+    r"\b(?:n[ée]|t[aá]|certo|isso|ok|entendeu|sabe|viu|beleza|combinado|correto)\s*\?\s*$",
+    re.IGNORECASE,
+)
+_PLACEHOLDER = re.compile(r"\[[A-ZÀ-Ý_]+\]")
+
+
+def clean_open_questions(items: Any) -> list[str]:
+    """Open questions a reader can act on, not lines lifted from the transcript.
+
+    Measured on the database in use: 4 of 10 analyses showed items such as
+    "[L5]: Fala seu [PESSOA], tudo bem?" and "DÚVIDA: [L13]: Você falou do migrar
+    de ambiente do local para nuvens, isso?" — a greeting and a confirmation, with
+    the speaker tag and the chunk's own category label still attached. Tags and
+    labels are stripped; greetings, confirmation questions ending in "né?",
+    "isso?" and the like, and items with under two real words are dropped.
+    Two and not more: "Qual é o prazo?" has exactly two ("qual", "prazo").
+    Anonymization placeholders are not real words: with a rule against asking
+    about them in the prompt, the model still wrote "Quem é o [LOCAL]?".
+    """
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items or []:
+        if not isinstance(item, str):
+            continue
+        text = _CATEGORY_PREFIX.sub("", _SPEAKER_TAG.sub(" ", item))
+        text = " ".join(text.split()).strip(" -•")
+        if not text or _GREETING.search(text) or _CONFIRMATION_TAIL.search(text):
+            continue
+        real_words = re.findall(r"[^\W\d_]{3,}", _PLACEHOLDER.sub(" ", text))
+        if len(real_words) < 2 or text.casefold() in seen:
+            continue
+        seen.add(text.casefold())
+        cleaned.append(text)
+    return cleaned
+
+
+_CARD_TEXT_FIELDS = (
+    "oportunidade_comercial", "gap_produto", "problemas_identificados",
+    "feedback_produto", "recomendacao_acao",
+)
+
+
+def clean_card_items(items: Any, *, cut_at: int | None = None) -> list[str]:
+    """Card list items without transcript markup or a broken tail.
+
+    Measured on CSV meeting 1263093: while processing, Problemas Identificados
+    showed "[L19]: assim, é inviável hoje o pessoal do fiscal dando [L66]:
+    manutenção..."; the final card had "(48h úteis).," and "regras)," from the
+    model, and one item stopped at exactly 180 characters, the schema's maxLength,
+    on "(48h". Tags, labels and trailing separators go; an item exactly `cut_at`
+    long that ends mid-sentence goes back to its last full sentence. Unlike open
+    questions, nothing is dropped for being short: a problem can be two words.
+    """
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items or []:
+        if not isinstance(item, str):
+            continue
+        text = _CATEGORY_PREFIX.sub("", _SPEAKER_TAG.sub(" ", item))
+        text = " ".join(text.split()).strip(" -•").rstrip(" ,;:")
+        if cut_at and len(item) == cut_at and not text.endswith((".", "!", "?", "…")):
+            last_sentence = re.match(r"^(.*[.!?])\s", text)
+            text = (last_sentence.group(1) if last_sentence
+                    else text.rsplit(" ", 1)[0].rstrip(" ,;:") + "…")
+        if not text or text.casefold() in seen:
+            continue
+        seen.add(text.casefold())
+        cleaned.append(text)
+    return cleaned
+
+
 def _salvage_chunk_summary(raw: str) -> dict[str, Any] | None:
     marker = '"pontos_chave"'
     marker_index = raw.find(marker)
@@ -161,7 +244,10 @@ def _extract_deterministic_chunk_points(text: str) -> list[str]:
         add("BUDGET", match.group(0))
 
     for match in re.finditer(r"(?:^|[.!]\s+)([^.!?]{2,180}\?)", text):
-        add("DÚVIDA", match.group(1))
+        # Every sentence ending in "?" used to become a DÚVIDA point, greetings
+        # and "né?" included, and consolidation copied them onto the card.
+        for question in clean_open_questions([match.group(1)]):
+            add("DÚVIDA", question)
 
     for match in re.finditer(
         r"\b(CRM)\s+para\s+(\d+)\s+(pessoas|usuários|licenças|vendedores)\b",
@@ -259,9 +345,12 @@ CHUNK_SUMMARY_SCHEMA_NO_MOTIVES = {
     "additionalProperties": False,
 }
 
+# The grammar stops a string here mid-word ("... do time de produto (48h").
+_FINAL_ITEM_MAX_CHARS = 180
+
 FINAL_LIST_SCHEMA = {
     "type": "array",
-    "items": {"type": "string", "maxLength": 180},
+    "items": {"type": "string", "maxLength": _FINAL_ITEM_MAX_CHARS},
     "maxItems": 3,
 }
 
@@ -360,33 +449,41 @@ def complete_missing_fields(
 ) -> dict[str, Any]:
     properties = FINAL_SUMMARY_SCHEMA["properties"]
     missing = missing_fields(final_summary, include_empty=include_empty)
-    if not missing:
-        return dict(final_summary)
-    missing_schema = {
-        "type": "object",
-        "properties": {name: properties[name] for name in missing},
-        "required": missing,
-        "additionalProperties": False,
-    }
-    prompt = (
-        "Preencha somente os campos ausentes indicados pelo schema. Use apenas "
-        "os fatos dos resumos parciais, não altere campos existentes e não "
-        "invente fatos.\n\nJSON PARCIAL:\n"
-        f"{json.dumps(final_summary, ensure_ascii=False)}\n\nRESUMOS:\n"
-        f"{json.dumps(chunk_summaries, ensure_ascii=False)}"
-    )
-    completion = _generate_json(
-        prompt,
-        missing_schema,
-        False,
-        max(settings.ollama_consolidation_num_predict, 768),
-        settings.consolidation_model,
-        client=client,
-    )
     merged = dict(final_summary)
-    for name in missing:
-        if name in completion:
-            merged[name] = completion[name]
+    if missing:
+        missing_schema = {
+            "type": "object",
+            "properties": {name: properties[name] for name in missing},
+            "required": missing,
+            "additionalProperties": False,
+        }
+        prompt = (
+            "Preencha somente os campos ausentes indicados pelo schema. Use apenas "
+            "os fatos dos resumos parciais, não altere campos existentes e não "
+            "invente fatos. Escreva com suas palavras: nunca copie os pontos dos "
+            "resumos como estão, nem tags de locutor como [L5] ou rótulos de "
+            "categoria como \"DÚVIDA:\".\n\nJSON PARCIAL:\n"
+            f"{json.dumps(final_summary, ensure_ascii=False)}\n\nRESUMOS:\n"
+            f"{json.dumps(chunk_summaries, ensure_ascii=False)}"
+        )
+        completion = _generate_json(
+            prompt,
+            missing_schema,
+            False,
+            max(settings.ollama_consolidation_num_predict, 768),
+            settings.consolidation_model,
+            client=client,
+        )
+        for name in missing:
+            if name in completion:
+                merged[name] = completion[name]
+    # Every path that ends a summary passes here, LLM consolidation included: on a
+    # 5-chunk meeting it copied the chunks' DÚVIDA points onto the card as they were.
+    if "duvidas_em_aberto" in merged:
+        merged["duvidas_em_aberto"] = clean_open_questions(merged["duvidas_em_aberto"])
+    for name in _CARD_TEXT_FIELDS:
+        if name in merged:
+            merged[name] = clean_card_items(merged[name], cut_at=_FINAL_ITEM_MAX_CHARS)
     return merged
 
 
@@ -716,6 +813,15 @@ evidências, recomendações e dúvidas em aberto.
   portfólio não atende. Não transforme troca de computador em gap de produto.
 - Em evidencias, associe cada insight ao trecho literal mais próximo disponível
   nos resumos. Remova duplicações e descarte fatos sem sustentação.
+- Em duvidas_em_aberto, liste de 1 a 3 pontos que ficaram em aberto depois da
+  reunião e que o time comercial precisa esclarecer ou confirmar com o cliente,
+  escritos como perguntas objetivas com suas palavras. Raciocine sobre a reunião
+  inteira: o que foi prometido e não confirmado, o que o cliente não sabe ou não
+  decidiu, o que depende de alguém que não estava presente, o que ficou sem prazo
+  ou sem responsável. Não liste o que já foi respondido na própria reunião.
+  Nunca copie falas da transcrição, tags como [L5] ou rótulos como "DÚVIDA:";
+  cumprimentos ("tudo bem?") e perguntas de confirmação ("né?", "isso?") não são
+  pontos em aberto. Sem ponto em aberto de verdade, lista vazia.
 Quando não houver informação, use lista vazia, score 0, "não identificado" ou
 identificado=false. Os resumos têm pontos prefixados por categoria, mas os
 rótulos podem estar errados: valide o sentido do texto antes de consolidar.

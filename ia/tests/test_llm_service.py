@@ -22,6 +22,143 @@ def client_for(handler):
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
+def test_open_questions_drop_greetings_confirmations_tags_and_labels():
+    """Medido no banco em uso: 4 de 10 análises mostravam no card itens como
+    "[L5]: Fala seu [PESSOA], tudo bem?" e "DÚVIDA: [L13]: Você falou do migrar de
+    ambiente do local para nuvens, isso?" — fala crua, com tag de locutor e o
+    rótulo interno do chunk.
+    """
+    from src.app.services.llm_service import clean_open_questions
+
+    items = [
+        "[L5]: Fala seu [PESSOA], tudo bem?",
+        "DÚVIDA: [L13]: Você falou do migrar de ambiente do local para nuvens, isso?",
+        "[L7]: Olá, tudo bem?",
+        "Bem-vinda para a [EMPRESA], né?",
+        "DÚVIDA: Como fica a migração dos pedidos antigos para a nuvem?",
+    ]
+
+    assert clean_open_questions(items) == [
+        "Como fica a migração dos pedidos antigos para a nuvem?"
+    ]
+
+
+def test_open_questions_keep_a_written_question_and_drop_duplicates():
+    """Um item que o LLM escreveu, mesmo sem "?", é o que o card deve mostrar."""
+    from src.app.services.llm_service import clean_open_questions
+
+    question = "Se as licenças do CRM e ERP são compartilhadas ou nomeadas."
+
+    assert clean_open_questions([question, question.upper(), None, ""]) == [question]
+
+
+def test_open_questions_about_an_anonymized_name_are_dropped():
+    """Medido na reunião curta: mesmo com uma regra no prompt contra perguntar por
+    dado anonimizado, a consolidação escreveu "Quem é o [LOCAL]?". Um ponto em aberto
+    de verdade que só cita o marcador continua.
+    """
+    from src.app.services.llm_service import clean_open_questions
+
+    kept = (
+        "O cliente confirmou que a migração para o ambiente Prime pode ser "
+        "executada no próximo fim de semana?"
+    )
+    cited = "O [PESSOA] vai aprovar a proposta até sexta?"
+
+    assert clean_open_questions(["Quem é o [LOCAL]?", kept, cited]) == [kept, cited]
+
+
+def test_card_items_lose_tags_trailing_separators_and_a_cut_tail():
+    """Medido na reunião 1263093 do CSV: um item parou nos 180 caracteres do schema
+    em "(48h", e outros terminaram em "(48h úteis).," e "regras),"."""
+    from src.app.services.llm_service import _FINAL_ITEM_MAX_CHARS, clean_card_items
+
+    cut = (
+        "Falta de automação: o sistema atual exige mais configuração do que gera "
+        "benefício, causando retrabalho repetitivo de dados (data entry). Lentidão no "
+        "retorno do time de produto (48h"
+    )
+    assert len(cut) == _FINAL_ITEM_MAX_CHARS
+
+    assert clean_card_items([
+        cut,
+        "Processo de validação de regras é excessivamente lento (48h úteis).,",
+        "Falta de capacidade de parametrização rápida (ex: 48h para validar regras),",
+        "[L19]: assim, é inviável hoje o pessoal do fiscal dando [L66]: manutenção.",
+        "PROBLEMA: Sem teste",
+        "Sem teste",
+    ], cut_at=_FINAL_ITEM_MAX_CHARS) == [
+        "Falta de automação: o sistema atual exige mais configuração do que gera "
+        "benefício, causando retrabalho repetitivo de dados (data entry).",
+        "Processo de validação de regras é excessivamente lento (48h úteis).",
+        "Falta de capacidade de parametrização rápida (ex: 48h para validar regras)",
+        "assim, é inviável hoje o pessoal do fiscal dando manutenção.",
+        "Sem teste",
+    ]
+
+
+def test_a_long_deterministic_item_is_not_cut_as_if_the_grammar_stopped_it():
+    """Só o tamanho exato do schema indica corte; sem `cut_at`, nada é encurtado."""
+    from src.app.services.llm_service import clean_card_items
+
+    long_item = "Cliente relata que " + "a parametrização demora " * 10 + "demais"
+
+    assert clean_card_items([long_item]) == [long_item]
+
+
+def test_final_card_text_fields_are_cleaned_without_calling_the_model():
+    from src.app.services.llm_service import FINAL_SUMMARY_SCHEMA, complete_missing_fields
+
+    summary = {name: [] for name in FINAL_SUMMARY_SCHEMA["required"]}
+    summary["gap_produto"] = ["Inexistência de cadastro único entre matrizes,"]
+
+    result = complete_missing_fields(summary, [])
+
+    assert result["gap_produto"] == ["Inexistência de cadastro único entre matrizes"]
+
+
+def test_consolidation_prompt_asks_for_written_open_questions():
+    """Numa reunião de 5 chunks a consolidação copiou os pontos de DÚVIDA como
+    estavam, rótulo e tag de locutor incluídos; o prompt não dizia nada do campo.
+    """
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["prompt"] = json.loads(request.content)["prompt"]
+        return httpx.Response(200, json={"response": json.dumps({"produto": []})})
+
+    consolidate_summaries(
+        [{"pontos_chave": ["DÚVIDA: [L13]: Qual é o prazo de implantação?"]}],
+        client=client_for(handler),
+    )
+
+    assert "nunca copie falas da transcrição" in seen["prompt"].lower()
+
+
+def test_refilled_open_questions_are_cleaned():
+    """O recompletar pede ao LLM só os campos vazios, a partir dos resumos de
+    chunk, e ele devolvia os pontos como estavam: "DÚVIDA: [L13]: ...".
+    """
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"response": json.dumps({
+            "duvidas_em_aberto": [
+                "DÚVIDA: [L13]: Você falou do migrar de ambiente do local para nuvens, isso?",
+                "DÚVIDA: Como fica a migração dos pedidos antigos para a nuvem?",
+            ],
+        }, ensure_ascii=False)})
+
+    result = complete_missing_fields(
+        {"duvidas_em_aberto": []},
+        [{"pontos_chave": ["DÚVIDA: [L13]: Você falou do migrar de ambiente?"]}],
+        include_empty=True,
+        client=client_for(handler),
+    )
+
+    assert result["duvidas_em_aberto"] == [
+        "Como fica a migração dos pedidos antigos para a nuvem?"
+    ]
+
+
 def test_generate_chunk_summary_uses_configured_model_and_decodes_json(monkeypatch):
     monkeypatch.setattr(settings, "chunk_model", "modelo-chunk:latest")
     monkeypatch.setattr(settings, "ollama_keep_alive", "30m")

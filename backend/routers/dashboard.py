@@ -8,7 +8,7 @@ Substituem os dados mockados do frontend. A leitura vem de ``ai.meeting_analyses
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_user
@@ -16,6 +16,7 @@ from core.database import get_db
 from models.user import UserModel
 from services import analysis_read
 from services.ia_gateway import get_ia_client, readiness
+from services.meeting_deletion import delete_meeting
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -97,6 +98,25 @@ def dashboard_meeting_detail(
         raise HTTPException(404, "Análise não encontrada.")
     item.update(readiness({"status": item["status"], "summary_is_final": item["summary_is_final"]}))
     return item
+
+
+@router.delete("/meetings/{analysis_id}", status_code=204)
+def dashboard_meeting_delete(
+    analysis_id: UUID,
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Exclui a reunião inteira, `ai` e `core`, numa transação só.
+
+    Não passa pela IA: ver a exceção em CLAUDE.md ("Serviços") e a ordem da
+    exclusão em services/meeting_deletion.py.
+    """
+    try:
+        delete_meeting(db, user, analysis_id)
+    finally:
+        # On any failure this undoes every delete and releases the row locks.
+        db.rollback()
+    return Response(status_code=204)
 
 
 def _clean_history(raw) -> list[dict]:

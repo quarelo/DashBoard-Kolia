@@ -2,9 +2,11 @@ import { useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import {
   ArrowLeft, Layers, MessageSquare, AlertTriangle, Target, Package, Users,
-  Quote, HelpCircle, CheckSquare, Wallet, TriangleAlert, FileText,
+  Quote, HelpCircle, CheckSquare, Wallet, TriangleAlert, FileText, Trash2,
 } from "lucide-react";
 import { useAsync } from "../lib/useAsync";
+import { useAuth } from "../context/AuthContext";
+import { DeleteMeetingDialog } from "../components/meetings/DeleteMeetingDialog";
 import {
   dashboardService, sentimentLabels, sentimentTone, statusLabel,
   riskLabel, opportunityLabel, evidenceCategoryLabels,
@@ -87,6 +89,8 @@ export function MeetingDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [showTranscript, setShowTranscript] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const { user } = useAuth();
   const { data, loading, error, reload } = useAsync<AnalysisDetail>(
     () => dashboardService.detail(id ?? ""),
     [id],
@@ -103,6 +107,9 @@ export function MeetingDetail() {
   }
 
   const fs = data.finalSummary;
+  // O backend decide (dono da importação ou diretor comercial); aqui só se esconde o
+  // botão de quem certamente não pode: análise sem importação, só o diretor exclui.
+  const canDelete = user?.role === "SALES_DIRECTOR" || data.meetingId !== null;
   const metadata = Object.entries(data.metadata).filter(([, v]) => v && v !== "");
 
   return (
@@ -114,6 +121,14 @@ export function MeetingDetail() {
         </button>
         <span className="text-gray-300">/</span>
         <span className="text-gray-700 font-medium truncate">{data.title}</span>
+        {canDelete && (
+          <button
+            onClick={() => setConfirmDelete(true)}
+            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-xs font-medium text-gray-600 hover:text-rose-600 hover:border-rose-200 hover:bg-rose-50 transition-colors flex-shrink-0"
+          >
+            <Trash2 size={13} /> Excluir
+          </button>
+        )}
       </div>
 
       {/* Header */}
@@ -239,6 +254,15 @@ export function MeetingDetail() {
             <MessageSquare size={15} /> Abrir Chat
           </Link>
         </div>
+      )}
+
+      {confirmDelete && (
+        <DeleteMeetingDialog
+          analysisId={data.analysisId}
+          title={data.title}
+          onClose={() => setConfirmDelete(false)}
+          onDeleted={() => navigate("/app/meetings", { replace: true })}
+        />
       )}
     </div>
   );

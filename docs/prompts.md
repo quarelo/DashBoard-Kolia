@@ -155,7 +155,8 @@ erro observado:
 ## 6. Consolidação
 
 **`ia/src/app/services/llm_service.py::consolidate_summaries`**
-Modelo `CONSOLIDATION_MODEL` · `temperature=0` · `num_predict=384` ·
+Modelo `CONSOLIDATION_MODEL` · `temperature=0` ·
+`num_predict=OLLAMA_CONSOLIDATION_NUM_PREDICT` (1536) ·
 `think=OLLAMA_CONSOLIDATION_THINK` (false) · `format=FINAL_SUMMARY_SCHEMA`
 
 Recebe os resumos parciais e produz os 13 campos do `final_summary` — os mesmos
@@ -169,13 +170,16 @@ Regras que repetem as do #5 num nível acima, mais duas próprias:
 - **"Os resumos têm pontos prefixados por categoria, mas os rótulos podem estar
   errados: valide o sentido do texto antes de consolidar"** — o prompt não confia
   na saída do #5
+- Em `duvidas_em_aberto`, de 1 a 3 perguntas escritas pelo modelo sobre o que
+  ficou em aberto na reunião inteira, nunca fala copiada; ver "Dúvidas em aberto
+  com fala crua da transcrição — 2026-09-12"
 
 ---
 
 ## 7. Completar campos ausentes
 
 **`ia/src/app/services/llm_service.py::complete_missing_fields`**
-Modelo `CONSOLIDATION_MODEL` · `temperature=0` · `num_predict=max(384, 768)` ·
+Modelo `CONSOLIDATION_MODEL` · `temperature=0` · `num_predict=max(OLLAMA_CONSOLIDATION_NUM_PREDICT, 768)` ·
 `think=false` · `format` = schema **só dos campos que faltam**
 
 O prompt mais curto do projeto, quatro linhas: preencher somente os campos
@@ -250,7 +254,8 @@ CHAT_TEMPERATURE              0.4 no config.py, 0.0 no docker-compose.yml — em
                               container vale o do compose; todo o resto roda em 0
 CHAT_NUM_PREDICT=512
 OLLAMA_CHUNK_NUM_PREDICT=384  teto 512; 0 truncamentos em 256/384/512
-OLLAMA_CONSOLIDATION_NUM_PREDICT=768
+OLLAMA_CONSOLIDATION_NUM_PREDICT=1536  768 truncava as dúvidas raciocinadas
+OLLAMA_CONSOLIDATION_THINK=false       true devolveu resposta vazia com schema
 FAST_DETERMINISTIC_CONSOLIDATION=false
 TRUST_DECLARED_MOTIVES=true
 OLLAMA_THINK=True             mas os três caminhos JSON passam think=false
@@ -658,3 +663,107 @@ primeira: o cliente pergunta como deixar de digitar o orçamento, e o CSV é rec
 mostrado na demo. É a confusão entre demonstração e realidade do cliente que o
 prompt de chunk (#5) já tenta evitar, agora no chat. São 12 perguntas sem rótulo,
 então fica registrado como risco, não como taxa.
+
+---
+
+## Dúvidas em aberto com fala crua da transcrição — 2026-09-12
+
+No banco em uso, 4 de 10 análises mostravam no card itens como *"[L5]: Fala seu
+[PESSOA], tudo bem?"* e *"DÚVIDA: [L13]: Você falou do migrar de ambiente do local
+para nuvens, isso?"*: um cumprimento e uma confirmação, com a tag de locutor e o
+rótulo interno do chunk. Vinha de três caminhos com a mesma origem:
+
+| Análise | Chunks | Caminho |
+|---|---|---|
+| 5c1f17d2 | 5 | consolidação por LLM copiou os pontos de DÚVIDA como estavam |
+| 1127528d | 1 | atalho de chunk único, determinístico |
+| f7bb7324, 1eb71f25 | 21 | consolidação determinística anterior à troca de 2026-09-10 |
+
+A origem comum era a regex de DÚVIDA em `_extract_deterministic_chunk_points`, que
+transformava toda frase terminada em "?" num ponto `DÚVIDA:`, cumprimentos
+incluídos. Na reunião longa a consolidação sintetizava; na de 5 chunks, copiava.
+
+**Corrigido em três camadas.** `clean_open_questions` tira tag de locutor e rótulo
+de categoria e descarta cumprimento, pergunta de confirmação ("né?", "isso?") e
+item com menos de duas palavras reais — duas porque "Qual é o prazo?" tem
+exatamente duas; marcador de anonimização como `[LOCAL]` não conta como palavra.
+Ele filtra a regex na origem, as dúvidas do caminho determinístico,
+e o resultado de `complete_missing_fields`, por onde todo caminho passa no fim do
+pipeline e também o botão de recompletar. Os prompts de consolidação (#6) e de
+recompletar (#7) ganharam a regra de escrever com as próprias palavras, nunca
+copiando fala, tag ou rótulo.
+
+**Dúvidas raciocinadas, e a reunião de 1 chunk também passa pelo LLM.** Filtrar a
+fala crua não bastava: o pedido era um ponto em aberto pensado, como *"A equipe do
+cliente estará disponível para o levantamento ou será necessário enviar o checklist
+por escrito?"*, com mais tempo aceito em troca. A regra do #6 passou a pedir de 1 a
+3 perguntas sobre a reunião inteira: o que foi prometido e não confirmado, o que o
+cliente não sabe ou não decidiu, o que depende de alguém ausente, o que ficou sem
+prazo ou responsável. O atalho de chunk único saiu, porque sem consolidação as
+dúvidas de uma reunião curta eram só as frases com "?" que a regex pegava.
+
+Medido só a consolidação, com os mesmos resumos de chunk em cada perfil:
+
+| Perfil | `think=false`, 768 | `think=true`, 2048 | `think=false`, 1536 |
+|---|---|---|---|
+| curta (1 chunk) | 28,5s | vazia após 368 tokens | 19,8s |
+| 5 chunks (5c1f17d2) | 77,9s, truncou e repetiu (1355 tokens) | vazia após 972 tokens | 49,7s, 1279 tokens |
+| longa (21 chunks) | 109,2s, truncou e repetiu (1256 tokens) | vazia após 1232 tokens | 76,3s, 1116 tokens |
+
+- **`think` fica desligado.** Com o schema JSON, o modelo gastou o orçamento
+  pensando e devolveu 0 caracteres nos três perfis.
+- **`OLLAMA_CONSOLIDATION_NUM_PREDICT` subiu de 768 para 1536.** A resposta com as
+  dúvidas pensadas passa de 768 tokens: truncava e pagava uma segunda chamada. Com
+  1536, nenhuma truncou, e o tempo caiu 28s e 33s nos perfis longos.
+- A terceira coluna rodou com uma linha a mais no prompt, proibindo perguntar por
+  dado anonimizado. Ela não mudou a reunião curta, que ainda devolveu *"Quem é o
+  [LOCAL]?"*, e saiu. Quem cobre esse caso é o filtro.
+
+Dúvidas obtidas na terceira coluna:
+- 5 chunks: *"O cliente confirmou que a migração para o ambiente Prime pode ser
+  executada no próximo fim de semana?"*, *"Qual é a data exata até onde o cliente
+  está disposto a adiar a migração devido às pendências com fornecedores
+  externos?"* e *"O cliente autorizou formalmente a alteração do contrato atual
+  para incluir as licenças Progress adicionais necessárias?"*
+- longa: *"Como será o desenvolvimento conjunto das customizações solicitadas?"* e
+  *"Qual a viabilidade técnica de integrar a leitura de arquivos via IA para
+  montagem de pedidos?"*
+- curta: nenhuma depois do filtro. O trecho é o vendedor narrando uma demonstração,
+  sem nada em aberto, e a lista vazia não é recompletada no pipeline.
+
+**Análises já gravadas não mudam.** O backend lê `ai.meeting_analyses.final_summary`
+direto, então o card de uma análise antiga só melhora se ela for reprocessada ou se
+o campo for regravado.
+
+**A suíte da `main` estava vermelha.** Depois do merge do PR #11, 8 testes de
+`test_analysis_service.py` falhavam no próprio commit `13a3265`: o serviço passou a
+chamar `generate_chunk_summary` e `consolidate_summaries` com `metadata_context=`,
+e os mocks aceitavam só o texto. Os mocks agora aceitam os argumentos novos; 287
+testes passam no compose e do jeito que a CI roda.
+
+### Os outros campos de texto do card — reunião 1263093 do CSV
+
+Rodada no banco em uso, em 4 chunks e 157s. O raciocínio da IA ficou como está, por
+decisão do time; só o que era defeito de código mudou.
+
+- **Fala crua durante o processamento.** Enquanto a análise rodava, Problemas
+  Identificados mostrava *"[L19]: assim, é inviável hoje o pessoal do fiscal dando
+  [L66]: manutenção..."*. `clean_card_items` tira tag de locutor e rótulo de
+  categoria de oportunidade, gap, problemas, feedback e ações, no resumo preliminar,
+  no parcial e no final. Diferente das dúvidas, não descarta item curto.
+- **Item cortado.** *"... Lentidão no retorno do time de produto (48h"* tinha
+  exatamente 180 caracteres, o `maxLength` do `FINAL_LIST_SCHEMA`: a gramática
+  parou a string no meio. Um item com exatamente esse tamanho e sem pontuação final
+  volta até a última frase completa. Item determinístico mais longo não é cortado,
+  porque o critério é o tamanho exato do schema.
+- **Vírgula no fim.** O modelo escreveu *"(48h úteis).,"* e *"regras),"*; o
+  separador final sai.
+
+**Evidências vazias ficaram como estão.** A consolidação devolveu 5 evidências, e
+o `trecho` de todas era a frase do resumo do chunk (*"Cliente expressa intenção de
+rescindir contrato..."*), não da transcrição, então `_quoted_evidence` descartou as
+5. Trocar cada uma pela frase da transcrição mais parecida não se sustentou na
+calibração: as frases certas ficaram entre 0,12 e 0,28 de palavras em comum, e
+evidências da reunião longa, que não têm nada a ver com esta, chegaram a 0,30.
+Nenhum limiar separa as duas, e "48 horas úteis" casou com a frase errada. A causa
+é a consolidação ver só os resumos.

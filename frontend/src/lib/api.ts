@@ -80,7 +80,9 @@ export async function apiRequest<T>(
         ? detail
         : Array.isArray(detail)
           ? detail.map((d) => (d as { msg?: string }).msg ?? String(d)).join("; ")
-          : `Erro ${res.status}`;
+          : detail && typeof detail === "object" && typeof (detail as { message?: unknown }).message === "string"
+            ? (detail as { message: string }).message
+            : `Erro ${res.status}`;
     throw new ApiError(res.status, message);
   }
 

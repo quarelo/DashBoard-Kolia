@@ -53,8 +53,12 @@ class Settings(BaseSettings):
     # demo: churn 100 against 30 from the rules). On for qwen3.5:4b-q4_K_M, with
     # analysis_service dropping a declaration that covers all five codes.
     trust_declared_motives: bool = True
+    # Thinking on returned empty content with the JSON schema (0 characters, 368
+    # and 972 tokens spent) on qwen3.5:4b-q4_K_M, so it stays off.
     ollama_consolidation_think: bool = False
-    ollama_consolidation_num_predict: int = 768
+    # Reasoned open questions made the answer longer: 1256 and 1355 tokens on the
+    # 21- and 5-chunk meetings, so 768 truncated first and paid a second call.
+    ollama_consolidation_num_predict: int = 1536
     ollama_keep_alive: str = "30m"
     ollama_generate_timeout_seconds: float = 600.0
     ollama_embedding_timeout_seconds: float = 120.0
