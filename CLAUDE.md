@@ -135,7 +135,8 @@ imagem do backend não traz pytest, daí o `pip install` no container descartáv
 ## Carga do dataset
 
 `make reunioes` importa o `transcricoes_TOTVS.csv` (na raiz, fora do git) pelo
-backend e analisa uma reunião por vez. `make reunioes LIMIT=5` é o ensaio, e
+backend e analisa, uma por vez, as reuniões desse CSV que ainda não têm análise.
+Reuniões de outros imports da mesma conta ficam de fora. `make reunioes LIMIT=5` é o ensaio, e
 `make reunioes-plano` só divide e valida. A conta vem de `KOLIA_EMAIL` e
 `KOLIA_PASSWORD` no `.env`. Detalhes em `docs/meeting-import-flow.md`.
 

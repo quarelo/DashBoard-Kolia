@@ -154,8 +154,9 @@ make reunioes LIMIT=5 # ensaio: importa tudo e analisa 5
 make reunioes         # todas
 ```
 
-O script importa o CSV em partes, informa quantas reuniões vão ser analisadas e
-analisa uma por vez. A cada uma, mostra o tempo médio e quanto falta. Pode
+O script importa o CSV em partes, informa quantas reuniões desse CSV vão ser
+analisadas e analisa uma por vez. Reuniões de outros imports da mesma conta ficam
+de fora. A cada uma, mostra o tempo médio e quanto falta. Pode
 interromper e rodar de novo: as partes já importadas e as reuniões já analisadas
 são puladas. As 1.044 levam uns 2 a 3 dias numa GTX 1070 Ti. Detalhes no
 [fluxo de importação](docs/meeting-import-flow.md#carga-do-csv-inteiro).
