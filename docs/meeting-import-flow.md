@@ -27,8 +27,8 @@ flowchart TD
     M --> N[DONE: RAG disponível]
 ```
 
-Importar não dispara automaticamente as 500 análises. O envio à IA é explícito
-por reunião, para controlar a carga. A importação limitada é síncrona, sem fila
+Importar não dispara análise nenhuma. O envio à IA é explícito por reunião,
+para controlar a carga; `make reunioes` faz esse envio em lote, uma por vez. A importação limitada é síncrona, sem fila
 extra: retorna 201 após a transação de persistência. O trabalho pesado continua
 na fila existente da IA e sua rota retorna 202.
 
@@ -144,12 +144,21 @@ backend:
 1. divide o CSV em partes abaixo dos dois limites e valida cada uma com o parser do
    backend antes de enviar;
 2. importa as partes com a conta de `KOLIA_EMAIL`/`KOLIA_PASSWORD` do `.env`;
-3. dispara uma análise por vez e espera cada uma chegar em `DONE`, mostrando o tempo
-   médio e quanto falta.
+3. informa quantas reuniões vão ser analisadas, dispara uma por vez e espera cada
+   uma chegar em `DONE`, mostrando o tempo médio e quanto falta.
 
 A divisão é sempre a mesma, então rodar de novo reenvia partes idênticas, que voltam
 como `DUPLICATE_IMPORT`, e as reuniões concluídas são puladas. `make reunioes-plano`
 só divide e valida; `make reunioes LIMIT=5` é um ensaio curto.
+
+Uma falha no envio conta e o lote segue; cinco seguidas param tudo, porque aí o
+problema é o serviço. Uma análise sem progresso por 10 minutos é marcada como
+travada. Uma nova rodada só pega reuniões **sem análise**: a que terminou em erro
+ou travou já tem análise ligada e não é reenviada, e reprocessá-la é manual.
+
+Medido em 2026-09-12: as 9 partes importaram 1.043 reuniões novas e 1 versão.
+Reuniões de ~5 a 7 mil palavras levaram de 2 a 3 minutos cada numa GTX 1070 Ti;
+as 1.044 somam uns 2 a 3 dias.
 
 ## Reprocessamento e versões
 
@@ -193,12 +202,11 @@ o caminho antigo é o fallback. Reindexar não chama o LLM: são só os embeddin
 
 `core.meeting_imports` armazena hashes/contagens. `core.meetings` guarda origem,
 transcrição, metadados e vínculo à análise. `ai.analysis_submissions` guarda a
-chave de idempotência e o hash do payload. Bancos criados antes do versionamento
-precisam de `infra/postgres/migrations/001_meeting_versions.sql`: o `create_all`
-só cria tabelas, nunca altera as existentes, e sem esse script a coluna `version`
-não aparece e a aplicação quebra em runtime. As novas tabelas são adicionadas pelo
-bootstrap SQLAlchemy existente; não há remoção de dados nem recriação de tabelas.
-Migrações versionadas com Alembic ainda são uma entrega separada.
+chave de idempotência e o hash do payload. Todo o schema vem do Alembic, um por
+serviço (`backend/migrations`, `ia/migrations`). O container roda `alembic upgrade
+head` antes de subir, e o backend recusa iniciar com o banco fora da `head`. O
+`001_meeting_versions.sql` e o bootstrap por `create_all` de versões anteriores
+deste documento não existem mais.
 
 A IA reserva a chave antes de preparar os dados. Para requisições com chave,
 análise, chunks e vínculo à reserva são salvos juntos. Reenvios retornam o
@@ -206,6 +214,11 @@ vínculo persistido e não reenfileiram. Se o processo parar após o commit e an
 de enfileirar, a recuperação existente do worker no startup retoma a análise.
 Se a preparação falhar antes do commit, a reserva sem vínculo retorna 409 para
 revisão: não é removida ou expirada automaticamente.
+
+Na prática, o backend responde `409 ANALYSIS_NOT_READY` para uma reunião que não
+tem análise. Em 2026-09-12 a reunião 1000249 estava assim por uma reserva de
+2026-09-10. Conferido que a chave era dela e que não havia análise ligada, a linha
+foi apagada de `ai.analysis_submissions`, e o envio seguinte foi aceito.
 
 Clientes legados da IA sem `Idempotency-Key` mantêm seu comportamento. Em
 produção, o ingresso público deve acessar o backend; a IA deve ficar na rede
@@ -219,13 +232,19 @@ próprios). Banco de teste deve ser descartável: o fixture do backend limpa as
 tabelas desse banco entre casos e exige nome iniciado em `kolia_import_test`.
 
 ```sh
-TEST_DATABASE_URL=postgresql+psycopg2://usuario@localhost:5432/kolia_import_test python -m pytest -q backend/tests
-cd ia
-python -m pytest -q tests
+docker compose run --rm --no-deps \
+  -e TEST_DATABASE_URL=postgresql+psycopg2://usuario:senha@host:5432/kolia_import_test \
+  backend sh -c "pip install -q pytest && python -m pytest -q tests"
+docker compose build ia-service
+docker run --rm --network host \
+  -e DATABASE_URL=postgresql+psycopg2://kolia:kolia@localhost:5433/kolia \
+  -e SECRET_KEY=<32+ caracteres> \
+  dashboard-kolia-ia-service python -m pytest -q tests
 ```
 
 O teste PostgreSQL da IA é opcional com `TEST_DATABASE_URL`, usando um schema
 aleatório exclusivo de teste. O CSV real é somente leitura e seus testes são
 ignorados se o arquivo local não estiver presente. Testes da API simulam HTTP
-da IA e as suítes de IA simulam o Ollama. Nenhuma dessas suítes executa as 500
-análises ou valida desempenho/qualidade de inferência em hardware real.
+da IA e as suítes de IA simulam o Ollama. Nenhuma dessas suítes executa as análises
+do dataset ou valida desempenho/qualidade de inferência em hardware real; para isso
+existe `make reunioes LIMIT=5`.

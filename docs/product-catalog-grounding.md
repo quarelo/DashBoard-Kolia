@@ -171,8 +171,8 @@ identificado.
 A primeira versão implementada mandava sempre os 5 candidatos para uma
 chamada Ollama fechada, em toda análise. Isso foi revisto para um modelo
 híbrido pelo mesmo motivo que já limita outras decisões deste pipeline ao
-modelo pequeno disponível: o `consolidation_model` (`gemma3:1b` por
-padrão) já tem uma fraqueza documentada exatamente nesse tipo de tarefa —
+modelo pequeno disponível na época: o `consolidation_model` (`gemma3:1b`,
+hoje `qwen3.5:4b-q4_K_M`) tinha uma fraqueza documentada exatamente nesse tipo de tarefa —
 escolher dentre poucas opções fechadas. O comentário de
 `trust_declared_motives`, em `core/config.py`, registra que esse mesmo
 modelo, ao classificar motivos de churn/oportunidade dentre um catálogo
@@ -258,7 +258,8 @@ Implementado:
   partir dos pontos `PRODUTO:` já coletados nos chunks, caindo para o campo
   `produto` livre da consolidação quando não há nenhum ponto `PRODUTO:`.
 - A chamada roda dentro de `process_analysis_summaries`, depois de qualquer
-  um dos três caminhos de consolidação (determinístico, chunk único ou LLM) e
+  um dos dois caminhos de consolidação (determinístico ou LLM; o atalho de chunk
+  único saiu em 2026-09-12) e
   antes de `complete_missing_fields`, substituindo `final_summary["produto"]`
   pelo resultado. Só é pulada quando não há nenhum indício de produto para
   buscar (texto de busca vazio) — nesse caso `produto` não é tocado, evitando
