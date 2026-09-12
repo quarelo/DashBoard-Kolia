@@ -18,6 +18,16 @@ Dois serviços dividem um PostgreSQL e a fronteira é o schema: `core` é do
 backend, `ai` é da IA, e nenhum escreve na tabela do outro. Cada um tem seu
 Alembic e sua tabela de versão, no seu schema.
 
+**Exceção: excluir uma reunião.** O backend apaga direto as linhas do `ai` da
+análise, junto com as do `core`, numa transação só. Pela IA seriam duas
+transações em dois serviços, e uma falha entre elas deixava a reunião meio
+apagada; direto no banco é mais simples e atômico. Decisão do time em 2026-09-12.
+O custo: toda tabela nova no `ai` que guarde algo de uma análise precisa entrar
+em `AI_ROWS_BY_ANALYSIS`, em `backend/services/meeting_deletion.py`, na ordem das
+FKs. Se ficar de fora, sobra lixo ou a FK barra a exclusão inteira
+(`analysis_submissions` é `ON DELETE RESTRICT`). `backend/tests/test_delete_meeting.py`
+confere essa lista contra o schema do banco de teste.
+
 ## Execução
 
 **Tudo roda no Docker Compose, sempre.** Nada de `uvicorn` ou `npm run dev` no
