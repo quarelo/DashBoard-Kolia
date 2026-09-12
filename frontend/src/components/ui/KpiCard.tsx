@@ -6,6 +6,8 @@ interface KpiCardProps {
   value: string | number;
   change?: number;
   changeLabel?: string;
+  /** Texto simples abaixo do valor, sem seta — para contexto que não é uma variação (ex: "3 menções"). */
+  caption?: string;
   icon: React.ReactNode;
   accent?: "brand" | "emerald" | "rose" | "violet" | "blue";
 }
@@ -18,7 +20,7 @@ const accentMap = {
   blue:    { iconBg: "bg-blue-50",    iconColor: "text-blue-600",      bar: "bg-blue-500" },
 };
 
-export function KpiCard({ label, value, change, changeLabel, icon, accent = "brand" }: KpiCardProps) {
+export function KpiCard({ label, value, change, changeLabel, caption, icon, accent = "brand" }: KpiCardProps) {
   const a = accentMap[accent];
   const isPositive = (change ?? 0) >= 0;
 
@@ -34,7 +36,10 @@ export function KpiCard({ label, value, change, changeLabel, icon, accent = "bra
       </div>
 
       <div>
-        <p className="text-3xl font-extrabold text-ink tracking-tight">{value}</p>
+        <p className="text-3xl font-extrabold text-ink tracking-tight truncate" title={typeof value === "string" ? value : undefined}>{value}</p>
+        {caption && change === undefined && (
+          <p className="text-xs text-ink-secondary mt-1.5">{caption}</p>
+        )}
         {change !== undefined && (
           <div className={cn(
             "flex items-center gap-1 mt-1.5 text-xs font-semibold",

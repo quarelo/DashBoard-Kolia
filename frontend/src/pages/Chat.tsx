@@ -265,6 +265,9 @@ export function Chat() {
         )}
 
         <div className="px-4 py-4 border-t border-surface-border bg-white">
+          <p className="text-[10px] text-ink-muted text-left mb-2">
+            O ChatBot pode cometer erros. Por isso, lembre-se de conferir informações relevantes.
+          </p>
           <div className="flex gap-3 items-end">
             <div className="flex-1 bg-surface border border-surface-border rounded-2xl focus-within:border-brand/50 focus-within:ring-2 focus-within:ring-brand/20 transition-all">
               <textarea
