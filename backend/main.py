@@ -20,7 +20,7 @@ async def lifespan(_app):
 app = FastAPI(title="KOLIA Backend", lifespan=lifespan)
 app.add_middleware(ImportBodyLimitMiddleware, max_bytes=5 * 1024 * 1024 + 64 * 1024)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins,
-                   allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type"])
+                   allow_methods=["GET", "POST", "DELETE"],allow_headers=["Authorization", "Content-Type"])
 app.include_router(auth_router)
 app.include_router(meetings_router)
 app.include_router(dashboard_router)
