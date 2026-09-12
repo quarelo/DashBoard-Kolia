@@ -123,6 +123,11 @@ export const dashboardService = {
     const raw = await apiRequest<RawDetail>(`/api/dashboard/meetings/${analysisId}`);
     return toDetail(raw);
   },
+
+  /** Exclui a reunião: a análise, os trechos, o chat e a importação. */
+  async remove(analysisId: string): Promise<void> {
+    await apiRequest<void>(`/api/dashboard/meetings/${analysisId}`, { method: "DELETE" });
+  },
 };
 
 /* ── helpers de apresentação ─────────────────────────────────────────── */
