@@ -6,9 +6,10 @@ transcricoes_TOTVS.csv is 38 MiB and 1044 meetings against an upload limit of
 import csv
 import io
 
+import httpx
 import pytest
 
-from scripts.load_dataset import csv_parts, credentials
+from scripts.load_dataset import credentials, csv_parts, import_parts, meetings_to_analyse
 from services.meeting_parser import parse_meeting_file
 
 HEADER = ["ID_MEETING", "ANON_TRANSCRICAO", "NOTA_NPS"]
@@ -67,6 +68,39 @@ def test_a_meeting_too_big_for_any_part_stops_before_uploading():
 
     with pytest.raises(ValueError, match="linha de dados 1"):
         csv_parts(content, max_bytes=1024)
+
+
+def test_a_part_refused_as_duplicate_resends_only_the_meetings_missing_from_the_account():
+    """A parte 01 manteve o registro de import por duas reuniões analisadas, e as outras
+    130 foram apagadas: reenviar a parte idêntica voltava 409 e elas nunca voltavam."""
+    part = _csv(_meetings(3))
+    uploads = []
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/meetings":
+            return httpx.Response(200, json={"items": [{"external_id": "0", "analysis_id": "a"}], "total": 1})
+        uploads.append(request.content)
+        if len(uploads) == 1:
+            return httpx.Response(409, json={"detail": {"code": "DUPLICATE_IMPORT"}})
+        return httpx.Response(201, json={"imported_count": 2, "skipped_count": 0})
+
+    with httpx.Client(transport=httpx.MockTransport(backend), base_url="http://backend") as client:
+        import_parts(client, [(part, 3)], [{"0", "1", "2"}], "reunioes")
+
+    assert len(uploads) == 2
+    assert "reunião 0".encode() not in uploads[1]
+    assert "reunião 1".encode() in uploads[1] and "reunião 2".encode() in uploads[1]
+
+
+def test_only_meetings_of_this_csv_without_analysis_are_analysed():
+    """A conta tinha 454 reuniões de um ds.csv antigo, e o ensaio analisou cinco delas."""
+    meetings = [
+        {"external_id": "890417", "analysis_id": None},
+        {"external_id": "833454", "analysis_id": "ja-analisada"},
+        {"external_id": "1000249", "analysis_id": None},
+    ]
+
+    assert meetings_to_analyse(meetings, {"890417", "833454"}) == [meetings[0]]
 
 
 def test_credentials_come_from_the_env_file_unless_the_environment_has_them(tmp_path, monkeypatch):

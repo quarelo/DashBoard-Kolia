@@ -56,14 +56,7 @@ def log(message: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {message}", flush=True)
 
 
-def csv_parts(
-    content: bytes, max_bytes: int = PART_MAX_BYTES, max_rows: int = MAX_IMPORT_ROWS,
-) -> list[tuple[bytes, int]]:
-    """Split a meeting CSV into uploads the backend accepts: (bytes, meetings) each.
-
-    Every part repeats the header and keeps the source's delimiter and row order,
-    so the same CSV always yields the same parts.
-    """
+def _read_csv(content: bytes) -> tuple[str, list[str], list[list[str]]]:
     text = content.decode("utf-8-sig")
     header_line = text.splitlines()[0] if text else ""
     # Same rule the backend uses to pick the delimiter.
@@ -72,17 +65,43 @@ def csv_parts(
     header = next(reader, None)
     if not header:
         raise ValueError("o CSV não tem cabeçalho.")
+    return delimiter, header, list(reader)
+
+
+def _encode(rows: list[list[str]], delimiter: str) -> bytes:
+    buffer = io.StringIO()
+    csv.writer(buffer, delimiter=delimiter, lineterminator="\r\n").writerows(rows)
+    return buffer.getvalue().encode("utf-8")
+
+
+def csv_subset(content: bytes, external_ids: set[str]) -> bytes:
+    """The same CSV with only the meetings in `external_ids`, header included."""
+    delimiter, header, rows = _read_csv(content)
+    names = [name.strip() for name in header]
+    column = next((names.index(name) for name in ("ID_MEETING", "meeting_id") if name in names), None)
+    if column is None:
+        raise ValueError("o CSV não tem a coluna ID_MEETING.")
+    return _encode([header] + [row for row in rows if row[column].strip() in external_ids], delimiter)
+
+
+def csv_parts(
+    content: bytes, max_bytes: int = PART_MAX_BYTES, max_rows: int = MAX_IMPORT_ROWS,
+) -> list[tuple[bytes, int]]:
+    """Split a meeting CSV into uploads the backend accepts: (bytes, meetings) each.
+
+    Every part repeats the header and keeps the source's delimiter and row order,
+    so the same CSV always yields the same parts.
+    """
+    delimiter, header, rows = _read_csv(content)
 
     def encode(rows: list[list[str]]) -> bytes:
-        buffer = io.StringIO()
-        csv.writer(buffer, delimiter=delimiter, lineterminator="\r\n").writerows(rows)
-        return buffer.getvalue().encode("utf-8")
+        return _encode(rows, delimiter)
 
     head = encode([header])
     parts: list[tuple[bytes, int]] = []
     lines: list[bytes] = []
     size = len(head)
-    for number, row in enumerate(reader, start=1):
+    for number, row in enumerate(rows, start=1):
         line = encode([row])
         if len(head) + len(line) > max_bytes:
             raise ValueError(f"a linha de dados {number} sozinha passa de {max_bytes} bytes.")
@@ -118,26 +137,60 @@ def login(client: httpx.Client, email: str, password: str) -> str:
     return response.json()["access_token"]
 
 
-def import_parts(client: httpx.Client, parts: list[tuple[bytes, int]], stem: str) -> None:
+def _upload(client: httpx.Client, filename: str, content: bytes) -> tuple[int, dict]:
+    response = client.post(
+        "/api/imports", files={"file": (filename, content, "text/csv")}, timeout=120,
+    )
+    body = response.json() if response.content else {}
+    if response.status_code == 201:
+        return 201, body
+    detail = body.get("detail", {}) if isinstance(body, dict) else {}
+    if (response.status_code == 409 and isinstance(detail, dict)
+            and detail.get("code") == "DUPLICATE_IMPORT"):
+        return 409, body
+    sys.exit(f"{filename}: importação falhou ({response.status_code}): {response.text[:300]}")
+
+
+def import_parts(
+    client: httpx.Client, parts: list[tuple[bytes, int]], part_ids: list[set[str]], stem: str,
+) -> None:
+    account_ids: set[str] | None = None
     for index, (part, _count) in enumerate(parts, start=1):
         label = f"Parte {index}/{len(parts)}"
-        response = client.post(
-            "/api/imports",
-            files={"file": (f"{stem}_parte_{index:02d}.csv", part, "text/csv")},
-            timeout=120,
-        )
-        if response.status_code == 201:
-            body = response.json()
+        status, body = _upload(client, f"{stem}_parte_{index:02d}.csv", part)
+        if status == 201:
             log(f"{label}: importadas {body['imported_count']}, versionadas "
                 f"{body.get('versioned_count', 0)}, ignoradas {body['skipped_count']}.")
             continue
-        detail = response.json().get("detail", {}) if response.content else {}
-        if (response.status_code == 409 and isinstance(detail, dict)
-                and detail.get("code") == "DUPLICATE_IMPORT"):
-            # Expected on a re-run: the meetings are already in the database.
+        # The backend refuses a file it has a record of, even when meetings of that
+        # file were deleted since. On 2026-09-12 part 01 kept its record because two
+        # of its meetings kept their analysis, and its other 130 were deleted: without
+        # this, a re-run would never bring them back. Different bytes pass.
+        if account_ids is None:
+            account_ids = {meeting["external_id"] for meeting in all_meetings(client)}
+        missing = part_ids[index - 1] - account_ids
+        if not missing:
             log(f"{label}: já importada antes; seguindo.")
             continue
-        sys.exit(f"{label}: importação falhou ({response.status_code}): {response.text[:300]}")
+        status, body = _upload(
+            client, f"{stem}_parte_{index:02d}_faltantes.csv", csv_subset(part, missing))
+        if status == 201:
+            log(f"{label}: já importada antes, mas faltavam {len(missing)} reuniões na "
+                f"conta; reenviadas {body['imported_count']}.")
+        else:
+            log(f"{label}: as {len(missing)} reuniões que faltavam também foram recusadas "
+                "como duplicadas; seguindo.")
+
+
+def meetings_to_analyse(meetings: list[dict], csv_ids: set[str]) -> list[dict]:
+    """Meetings of this CSV that have no analysis yet.
+
+    The account can hold meetings from other imports. On 2026-09-12 it had 454 from
+    an older ds.csv next to the 1044 of transcricoes_TOTVS.csv, and the rehearsal
+    analysed five of those, because anything without an analysis was taken.
+    """
+    return [meeting for meeting in meetings
+            if meeting.get("analysis_id") is None and meeting.get("external_id") in csv_ids]
 
 
 def all_meetings(client: httpx.Client) -> list[dict]:
@@ -207,6 +260,8 @@ def main() -> None:
         sys.exit(f"CSV não encontrado: {args.csv}")
     with open(args.csv, "rb") as handle:
         content = handle.read()
+    csv_ids: set[str] = set()
+    part_ids: list[set[str]] = []
     try:
         parts = csv_parts(content)
         # The backend's own parser, before any write: a part it would refuse stops
@@ -215,6 +270,8 @@ def main() -> None:
             parsed = parse_meeting_file(part, "parte.csv")
             if len(parsed.meetings) != count:
                 raise ValueError(f"a parte {index} leu {len(parsed.meetings)} de {count} reuniões.")
+            part_ids.append({meeting.external_id for meeting in parsed.meetings})
+            csv_ids.update(part_ids[-1])
     except (ValueError, csv.Error, ImportValidationError) as error:
         sys.exit(f"CSV inválido: {error}")
     total_rows = sum(count for _part, count in parts)
@@ -234,11 +291,13 @@ def main() -> None:
     with httpx.Client(base_url=args.backend, timeout=60) as client:
         client.headers["Authorization"] = f"Bearer {login(client, email, password)}"
         if not args.skip_import:
-            import_parts(client, parts, Path(args.csv).stem)
+            import_parts(client, parts, part_ids, Path(args.csv).stem)
 
         meetings = all_meetings(client)
-        pending = [m for m in meetings if m.get("analysis_id") is None]
-        log(f"{len(meetings)} reuniões no banco; {len(pending)} sem análise.")
+        from_csv = sum(1 for meeting in meetings if meeting.get("external_id") in csv_ids)
+        pending = meetings_to_analyse(meetings, csv_ids)
+        log(f"{len(meetings)} reuniões na conta; {from_csv} deste CSV, "
+            f"{len(pending)} delas sem análise. As de outros imports ficam de fora.")
         without_analysis = len(pending)
         if args.limit:
             pending = pending[:args.limit]
