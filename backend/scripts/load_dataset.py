@@ -1,35 +1,114 @@
 """Import the meeting CSV and run every analysis, one at a time.
 
-Built for an unattended overnight run against a live backend + IA:
+Built for an unattended run against a live backend + IA, from the repo root:
 
-    python scripts/load_dataset.py --csv ../ia/dataset_tratado_revisado.csv \
-        --email ana@empresa.com
+    make reunioes-plano        # only splits and validates the CSV; no login, no writes
+    make reunioes LIMIT=5      # a short rehearsal: imports everything, analyses 5
+    make reunioes              # the whole transcricoes_TOTVS.csv
 
 It submits one analysis and waits for it to finish before submitting the next.
-Firing all 500 at once would only pile them into the IA's in-memory queue, where
+Firing all of them at once would only pile them into the IA's in-memory queue, where
 progress is invisible and a restart loses the ordering; one at a time keeps every
 completed meeting durable in the database, so re-running skips what is done.
 
-Safe to interrupt and re-run: import is idempotent (duplicate uploads are refused
-by the backend, which is not an error here) and meetings already DONE are skipped.
+The backend refuses an upload over 5 MiB or 1000 meetings, and
+transcricoes_TOTVS.csv is 38 MiB and 1044 meetings, so a single upload of it could
+never work. The CSV goes up in parts under both limits, each checked by the
+backend's own parser before anything is sent. The split is deterministic: a re-run
+sends the same bytes, and the backend answers 409 DUPLICATE_IMPORT, which is
+expected here.
+
+Credentials are KOLIA_EMAIL and KOLIA_PASSWORD, from the environment or from an env
+file (`make` mounts the root .env read-only), so the password never reaches argv.
+
+Safe to interrupt and re-run: parts already imported are refused as duplicates and
+meetings already DONE are skipped.
 """
 import argparse
+import csv
 import getpass
-import itertools
+import io
 import os
 import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import httpx
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from services.meeting_parser import (  # noqa: E402
+    MAX_IMPORT_BYTES,
+    MAX_IMPORT_ROWS,
+    ImportValidationError,
+    parse_meeting_file,
+)
 
 POLL_SECONDS = 3
 TERMINAL_OK = {"DONE"}
 TERMINAL_BAD = {"FAILED", "FAILED_ANALYSIS", "DASHBOARD_READY_WITH_EMBEDDING_ERROR"}
+# The HTTP body may carry 64 KiB of multipart envelope over MAX_IMPORT_BYTES;
+# staying 256 KiB under the file limit keeps the envelope out of the question.
+PART_MAX_BYTES = MAX_IMPORT_BYTES - 256 * 1024
 
 
 def log(message: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {message}", flush=True)
+
+
+def csv_parts(
+    content: bytes, max_bytes: int = PART_MAX_BYTES, max_rows: int = MAX_IMPORT_ROWS,
+) -> list[tuple[bytes, int]]:
+    """Split a meeting CSV into uploads the backend accepts: (bytes, meetings) each.
+
+    Every part repeats the header and keeps the source's delimiter and row order,
+    so the same CSV always yields the same parts.
+    """
+    text = content.decode("utf-8-sig")
+    header_line = text.splitlines()[0] if text else ""
+    # Same rule the backend uses to pick the delimiter.
+    delimiter = ";" if header_line.count(";") > header_line.count(",") else ","
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter, strict=True)
+    header = next(reader, None)
+    if not header:
+        raise ValueError("o CSV não tem cabeçalho.")
+
+    def encode(rows: list[list[str]]) -> bytes:
+        buffer = io.StringIO()
+        csv.writer(buffer, delimiter=delimiter, lineterminator="\r\n").writerows(rows)
+        return buffer.getvalue().encode("utf-8")
+
+    head = encode([header])
+    parts: list[tuple[bytes, int]] = []
+    lines: list[bytes] = []
+    size = len(head)
+    for number, row in enumerate(reader, start=1):
+        line = encode([row])
+        if len(head) + len(line) > max_bytes:
+            raise ValueError(f"a linha de dados {number} sozinha passa de {max_bytes} bytes.")
+        if lines and (size + len(line) > max_bytes or len(lines) == max_rows):
+            parts.append((head + b"".join(lines), len(lines)))
+            lines, size = [], len(head)
+        lines.append(line)
+        size += len(line)
+    if lines:
+        parts.append((head + b"".join(lines), len(lines)))
+    return parts
+
+
+def credentials(env_file: str | None) -> tuple[str | None, str | None]:
+    """KOLIA_EMAIL and KOLIA_PASSWORD: the environment first, then the env file."""
+    values: dict[str, str] = {}
+    if env_file and os.path.isfile(env_file):
+        with open(env_file, encoding="utf-8-sig") as handle:
+            for raw in handle:
+                key, separator, value = raw.strip().partition("=")
+                if separator and key in ("KOLIA_EMAIL", "KOLIA_PASSWORD"):
+                    values[key] = value.strip().strip("\"'")
+    return (
+        os.environ.get("KOLIA_EMAIL") or values.get("KOLIA_EMAIL"),
+        os.environ.get("KOLIA_PASSWORD") or values.get("KOLIA_PASSWORD"),
+    )
 
 
 def login(client: httpx.Client, email: str, password: str) -> str:
@@ -39,23 +118,26 @@ def login(client: httpx.Client, email: str, password: str) -> str:
     return response.json()["access_token"]
 
 
-def import_csv(client: httpx.Client, csv_path: str) -> None:
-    with open(csv_path, "rb") as handle:
+def import_parts(client: httpx.Client, parts: list[tuple[bytes, int]], stem: str) -> None:
+    for index, (part, _count) in enumerate(parts, start=1):
+        label = f"Parte {index}/{len(parts)}"
         response = client.post(
-            "/api/imports", files={"file": (os.path.basename(csv_path), handle)},
+            "/api/imports",
+            files={"file": (f"{stem}_parte_{index:02d}.csv", part, "text/csv")},
             timeout=120,
         )
-    if response.status_code == 201:
-        body = response.json()
-        log(f"Importadas {body['imported_count']}, versionadas "
-            f"{body.get('versioned_count', 0)}, ignoradas {body['skipped_count']}.")
-        return
-    detail = response.json().get("detail", {})
-    if response.status_code == 409 and detail.get("code") == "DUPLICATE_IMPORT":
-        # Expected on a re-run: the meetings are already in the database.
-        log("CSV já importado antes; seguindo para as análises.")
-        return
-    sys.exit(f"Importação falhou ({response.status_code}): {response.text[:300]}")
+        if response.status_code == 201:
+            body = response.json()
+            log(f"{label}: importadas {body['imported_count']}, versionadas "
+                f"{body.get('versioned_count', 0)}, ignoradas {body['skipped_count']}.")
+            continue
+        detail = response.json().get("detail", {}) if response.content else {}
+        if (response.status_code == 409 and isinstance(detail, dict)
+                and detail.get("code") == "DUPLICATE_IMPORT"):
+            # Expected on a re-run: the meetings are already in the database.
+            log(f"{label}: já importada antes; seguindo.")
+            continue
+        sys.exit(f"{label}: importação falhou ({response.status_code}): {response.text[:300]}")
 
 
 def all_meetings(client: httpx.Client) -> list[dict]:
@@ -100,8 +182,10 @@ def wait_for(client: httpx.Client, meeting_id: str, stall_seconds: float) -> str
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Carrega o dataset e roda as análises.")
-    parser.add_argument("--csv", required=True)
-    parser.add_argument("--email", required=True)
+    parser.add_argument("--csv", default="transcricoes_TOTVS.csv")
+    parser.add_argument("--email", default=None, help="Padrão: KOLIA_EMAIL.")
+    parser.add_argument("--env-file", default="/run/kolia.env",
+                        help="Arquivo com KOLIA_EMAIL e KOLIA_PASSWORD, se não vierem do ambiente.")
     parser.add_argument("--backend", default="http://localhost:8080")
     # A single 2000-token chunk takes about 70s on the reference host, so this is
     # several chunks' worth of silence before calling an analysis stuck.
@@ -115,16 +199,42 @@ def main() -> None:
     parser.add_argument("--abort-after", type=int, default=5, metavar="N",
                         help="Aborta após N falhas consecutivas.")
     parser.add_argument("--skip-import", action="store_true")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Só divide e valida o CSV; não faz login nem grava nada.")
     args = parser.parse_args()
 
     if not os.path.exists(args.csv):
         sys.exit(f"CSV não encontrado: {args.csv}")
-    password = os.environ.get("KOLIA_PASSWORD") or getpass.getpass("Senha: ")
+    with open(args.csv, "rb") as handle:
+        content = handle.read()
+    try:
+        parts = csv_parts(content)
+        # The backend's own parser, before any write: a part it would refuse stops
+        # the batch here instead of halfway through the upload.
+        for index, (part, count) in enumerate(parts, start=1):
+            parsed = parse_meeting_file(part, "parte.csv")
+            if len(parsed.meetings) != count:
+                raise ValueError(f"a parte {index} leu {len(parsed.meetings)} de {count} reuniões.")
+    except (ValueError, csv.Error, ImportValidationError) as error:
+        sys.exit(f"CSV inválido: {error}")
+    total_rows = sum(count for _part, count in parts)
+    log(f"{args.csv}: {total_rows} reuniões em {len(parts)} partes de até "
+        f"{PART_MAX_BYTES / 2**20:.2f} MiB, todas aceitas pelo parser do backend.")
+    if args.dry_run:
+        for index, (part, count) in enumerate(parts, start=1):
+            log(f"Parte {index}: {count} reuniões, {len(part) / 2**20:.2f} MiB.")
+        return
+
+    email, password = credentials(args.env_file)
+    email = args.email or email
+    if not email:
+        sys.exit("Defina KOLIA_EMAIL no .env ou passe --email.")
+    password = password or getpass.getpass("Senha: ")
 
     with httpx.Client(base_url=args.backend, timeout=60) as client:
-        client.headers["Authorization"] = f"Bearer {login(client, args.email, password)}"
+        client.headers["Authorization"] = f"Bearer {login(client, email, password)}"
         if not args.skip_import:
-            import_csv(client, args.csv)
+            import_parts(client, parts, Path(args.csv).stem)
 
         meetings = all_meetings(client)
         pending = [m for m in meetings if m.get("analysis_id") is None]
@@ -154,9 +264,9 @@ def main() -> None:
             if status in TERMINAL_OK:
                 done += 1
                 streak = 0
-                # Only successful runs shape the ETA: a stalled one contributes the
-                # whole --stall window and would push the estimate up for the rest
-                # of the batch, which is the opposite of what it is for.
+                # Only successful runs shape the average: a stalled one contributes
+                # the whole --stall window and would push the estimate up for the
+                # rest of the batch, which is the opposite of what it is for.
                 durations.append(elapsed)
             else:
                 failed += 1
@@ -165,14 +275,16 @@ def main() -> None:
                     log(f"Abortado: {streak} análises seguidas terminaram em falha. "
                         "Corrija a causa e rode de novo.")
                     break
-            ordered = sorted(durations)
-            median = ordered[len(ordered) // 2] if ordered else elapsed
-            remaining = timedelta(seconds=int(median * (len(pending) - index)))
+            average = sum(durations) / len(durations) if durations else elapsed
+            remaining = timedelta(seconds=int(average * (len(pending) - index)))
             log(f"[{index}/{len(pending)}] {meeting['external_id']}: {status} "
-                f"em {elapsed:.0f}s | ok={done} falhas={failed} | restam ~{remaining}")
+                f"em {elapsed:.0f}s | média {average:.0f}s | ok={done} falhas={failed} "
+                f"| restam ~{remaining}")
 
         total = timedelta(seconds=int(time.monotonic() - started))
-        log(f"Fim: {done} concluídas, {failed} com falha, em {total}.")
+        average = f"{sum(durations) / len(durations):.0f}s" if durations else "sem concluídas"
+        log(f"Fim: {done} concluídas, {failed} com falha, em {total}; "
+            f"tempo médio por reunião: {average}.")
         if failed:
             log("Rode de novo para tentar as que falharam; as concluídas são ignoradas.")
 
