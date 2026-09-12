@@ -148,13 +148,19 @@ backend:
    uma chegar em `DONE`, mostrando o tempo médio e quanto falta.
 
 A divisão é sempre a mesma, então rodar de novo reenvia partes idênticas, que voltam
-como `DUPLICATE_IMPORT`, e as reuniões concluídas são puladas. `make reunioes-plano`
+como `DUPLICATE_IMPORT`, e as reuniões concluídas são puladas. Se reuniões de uma
+parte já importada foram excluídas depois, o registro do import continua lá e a
+parte idêntica é recusada. Nesse caso o script confere quais reuniões da parte
+faltam na conta e reenvia só essas, num arquivo com bytes diferentes. `make reunioes-plano`
 só divide e valida; `make reunioes LIMIT=5` é um ensaio curto.
 
 Uma falha no envio conta e o lote segue; cinco seguidas param tudo, porque aí o
 problema é o serviço. Uma análise sem progresso por 10 minutos é marcada como
-travada. Uma nova rodada só pega reuniões **sem análise**: a que terminou em erro
-ou travou já tem análise ligada e não é reenviada, e reprocessá-la é manual.
+travada. Só entram reuniões **deste CSV** e **sem análise**. Reuniões de outros
+imports da mesma conta ficam de fora: em 2026-09-12 a conta tinha também 454 de
+um `ds.csv` antigo, e o primeiro ensaio analisou cinco delas antes desse filtro. A
+que terminou em erro ou travou já tem análise ligada e não é reenviada;
+reprocessá-la é manual.
 
 Medido em 2026-09-12: as 9 partes importaram 1.043 reuniões novas e 1 versão.
 Reuniões de ~5 a 7 mil palavras levaram de 2 a 3 minutos cada numa GTX 1070 Ti;
