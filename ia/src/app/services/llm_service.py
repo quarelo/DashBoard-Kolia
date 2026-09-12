@@ -120,6 +120,41 @@ def clean_open_questions(items: Any) -> list[str]:
     return cleaned
 
 
+_CARD_TEXT_FIELDS = (
+    "oportunidade_comercial", "gap_produto", "problemas_identificados",
+    "feedback_produto", "recomendacao_acao",
+)
+
+
+def clean_card_items(items: Any, *, cut_at: int | None = None) -> list[str]:
+    """Card list items without transcript markup or a broken tail.
+
+    Measured on CSV meeting 1263093: while processing, Problemas Identificados
+    showed "[L19]: assim, é inviável hoje o pessoal do fiscal dando [L66]:
+    manutenção..."; the final card had "(48h úteis).," and "regras)," from the
+    model, and one item stopped at exactly 180 characters, the schema's maxLength,
+    on "(48h". Tags, labels and trailing separators go; an item exactly `cut_at`
+    long that ends mid-sentence goes back to its last full sentence. Unlike open
+    questions, nothing is dropped for being short: a problem can be two words.
+    """
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items or []:
+        if not isinstance(item, str):
+            continue
+        text = _CATEGORY_PREFIX.sub("", _SPEAKER_TAG.sub(" ", item))
+        text = " ".join(text.split()).strip(" -•").rstrip(" ,;:")
+        if cut_at and len(item) == cut_at and not text.endswith((".", "!", "?", "…")):
+            last_sentence = re.match(r"^(.*[.!?])\s", text)
+            text = (last_sentence.group(1) if last_sentence
+                    else text.rsplit(" ", 1)[0].rstrip(" ,;:") + "…")
+        if not text or text.casefold() in seen:
+            continue
+        seen.add(text.casefold())
+        cleaned.append(text)
+    return cleaned
+
+
 def _salvage_chunk_summary(raw: str) -> dict[str, Any] | None:
     marker = '"pontos_chave"'
     marker_index = raw.find(marker)
@@ -310,9 +345,12 @@ CHUNK_SUMMARY_SCHEMA_NO_MOTIVES = {
     "additionalProperties": False,
 }
 
+# The grammar stops a string here mid-word ("... do time de produto (48h").
+_FINAL_ITEM_MAX_CHARS = 180
+
 FINAL_LIST_SCHEMA = {
     "type": "array",
-    "items": {"type": "string", "maxLength": 180},
+    "items": {"type": "string", "maxLength": _FINAL_ITEM_MAX_CHARS},
     "maxItems": 3,
 }
 
@@ -443,6 +481,9 @@ def complete_missing_fields(
     # 5-chunk meeting it copied the chunks' DÚVIDA points onto the card as they were.
     if "duvidas_em_aberto" in merged:
         merged["duvidas_em_aberto"] = clean_open_questions(merged["duvidas_em_aberto"])
+    for name in _CARD_TEXT_FIELDS:
+        if name in merged:
+            merged[name] = clean_card_items(merged[name], cut_at=_FINAL_ITEM_MAX_CHARS)
     return merged
 
 
