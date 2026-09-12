@@ -1,631 +1,219 @@
-# KOLIA — Estado Atual e Roadmap do Serviço de IA
+# KOLIA — Estado atual e roadmap do serviço de IA
+
+Atualizado em 2026-09-12. A versão anterior deste documento descrevia um backend
+Java, o modelo `qwen3:1.7b`, um endpoint síncrono e nenhum chat. Nada disso vale
+mais; o que mudou está na seção 9, fase por fase.
 
 ## 1. Objetivo
 
-Este documento registra o funcionamento atual do serviço de IA do KOLIA e
-organiza os próximos passos planejados.
+O serviço de IA recebe a transcrição de uma reunião e devolve:
+- o resumo estruturado que alimenta o dashboard (13 campos);
+- um índice da reunião para busca e chat.
 
-O serviço recebe a transcrição de uma reunião, sanitiza o conteúdo, divide o
-texto em chunks, gera uma análise estruturada com Ollama, cria embeddings e
-persiste os resultados no PostgreSQL com pgvector.
-
-As funcionalidades descritas na seção **Roadmap futuro** ainda não estão
-implementadas. Elas representam a direção recomendada para a evolução do
-produto.
-
----
+Ele roda em FastAPI (`ia/`), usa o Ollama local e persiste tudo no schema `ai` do
+PostgreSQL com pgvector.
 
 ## 2. Arquitetura atual
 
 ```text
-Frontend
-   ↓
-Backend Java Spring Boot
-   ↓
-Serviço de IA FastAPI
-   ├── sanitização e chunking
-   ├── Ollama — análise estruturada
-   └── Ollama — embeddings
-   ↓
-PostgreSQL + pgvector
+Frontend React ──▶ Backend FastAPI (schema core)
+                      │  token de serviço, Idempotency-Key
+                      ▼
+                   Serviço de IA FastAPI (schema ai)
+                      ├── fila em memória + worker (1 análise por vez)
+                      ├── Ollama: resumo por chunk, consolidação, produto, chat
+                      ├── Ollama: embeddings (nomic-embed-text)
+                      └── PostgreSQL + pgvector
 ```
 
-### Responsabilidades
+O backend é dono de usuários, importação e permissões. A IA não conhece usuário:
+recebe `meeting_id`, título, transcrição e até 5 campos de contexto comercial do
+CSV.
 
-O backend principal será responsável por usuários, autenticação, permissões,
-reuniões e regras de negócio.
-
-O serviço FastAPI é responsável por:
-
-- receber a transcrição;
-- sanitizar o texto;
-- estimar a quantidade de tokens;
-- dividir transcrições grandes em chunks;
-- analisar cada chunk com um modelo do Ollama;
-- gerar embeddings com um modelo específico;
-- consolidar análises de múltiplos chunks;
-- persistir análises e chunks;
-- disponibilizar os resultados por API.
-
----
-
-## 3. Fluxo atual da análise
+## 3. Fluxo da análise
 
 ```text
-transcrição original
-→ sanitização global
-→ contagem aproximada de tokens
-→ divisão em chunks
-→ limpeza individual de cada chunk
-→ análise estruturada pelo Ollama
-→ geração do embedding
-→ persistência do chunk
-→ consolidação, quando houver mais de um chunk
-→ persistência da análise final
+POST /analisar
+→ reserva a Idempotency-Key (ai.analysis_submissions)
+→ sanitiza, conta tokens, fatia em chunks de 2000 tokens (overlap 120)
+→ grava a análise em PROCESSING com um resumo preliminar determinístico
+→ enfileira e responde 202
+
+worker
+→ ANALYZING: resume com o LLM os chunks de maior sinal, até MAX_LLM_CHUNKS (15),
+  dois por vez; os demais recebem resumo determinístico
+→ a cada chunk resumido, regrava o resumo parcial do card
+→ consolidação por LLM, também em reunião de um chunk só
+→ churn e oportunidade pela tabela de motivos; evidências conferidas contra a
+  transcrição; produto escolhido só do catálogo ai.products
+→ completa campos ausentes e limpa o texto do card
+→ DASHBOARD_READY (resumo final)
+→ EMBEDDING: passagens de 400 tokens (overlap 40), uma a uma
+→ DONE: busca e chat liberados
 ```
 
-### Sanitização
+| Status | Significado |
+|---|---|
+| `PROCESSING` | criada e na fila |
+| `ANALYZING` | resumindo os chunks |
+| `DASHBOARD_READY` | resumo final pronto; embeddings a seguir |
+| `EMBEDDING` | gerando os embeddings |
+| `DONE` | resumo e índice prontos |
+| `DASHBOARD_READY_WITH_EMBEDDING_ERROR` | resumo pronto, índice falhou; chat fechado |
+| `FAILED`, `FAILED_ANALYSIS` | falha, com `error_message` |
 
-A sanitização ocorre antes de qualquer conteúdo ser enviado ao modelo.
+O card também informa `summary_stage` (`PRELIMINARY`, `PARTIAL`, `COMPLETE`) e
+`summary_is_final`.
 
-Atualmente ela:
-
-- remove bytes nulos;
-- normaliza espaços e quebras de linha;
-- remove expressões simples de conversa introdutória;
-- preserva separadamente o conteúdo original e o conteúdo limpo.
-
-Essa etapa pode ser aprimorada posteriormente sem alterar a integração com o
-Ollama.
-
-### Chunk único
-
-Quando a reunião gera apenas um chunk, a análise final é construída diretamente
-a partir da análise estruturada desse chunk.
-
-Não é feita uma segunda chamada de consolidação. Isso:
-
-- preserva decisões e problemas já extraídos;
-- evita contradições introduzidas por uma segunda interpretação;
-- reduz o tempo de resposta.
-
-### Múltiplos chunks
-
-Quando existem dois ou mais chunks, o modelo analisa cada parte separadamente.
-Depois, uma chamada adicional consolida os resumos parciais em uma visão final
-da reunião.
-
----
+Ao subir, o worker retoma as análises em `PROCESSING`, `ANALYZING`,
+`DASHBOARD_READY` e `EMBEDDING`, e reaproveita os chunks já resumidos. Uma reserva
+de idempotência sem análise, deixada por uma falha antes da criação, não expira: a
+reunião responde 409 até alguém apagar a reserva (ver
+`docs/meeting-import-flow.md`).
 
 ## 4. Modelos
 
-O fluxo utiliza dois modelos independentes.
+| Papel | Configuração | Hoje |
+|---|---|---|
+| Chat | `OLLAMA_MODEL` | `qwen3.5:4b-q4_K_M` |
+| Resumo por chunk | `OLLAMA_CHUNK_MODEL`, `OLLAMA_CHUNK_NUM_PREDICT=384` | `qwen3.5:4b-q4_K_M` |
+| Consolidação, completar campos, produto | `OLLAMA_CONSOLIDATION_MODEL`, `OLLAMA_CONSOLIDATION_NUM_PREDICT=1536` | `qwen3.5:4b-q4_K_M` |
+| Embeddings | `EMBEDDING_MODEL`, `EMBEDDING_DIM=768` | `nomic-embed-text` |
 
-### Modelo de análise
+- **Contexto:** 32768 tokens.
+- **GPU:** entra por `docker-compose.gpu.yml`, ligado com `COMPOSE_FILE` no `.env`.
+- **Thinking:** desligado nas chamadas com schema JSON. Na consolidação, ligado
+  devolveu resposta vazia em 3 de 3 perfis.
 
-Responsável por resumos, decisões, problemas, dúvidas, evidências, métricas e
-ações explicitamente mencionadas.
+A escolha dos modelos, os limites de tokens e os prompts, com as medições que os
+sustentam, estão em `docs/prompts.md`.
 
-Configurado no `.env`:
+## 5. Chat da reunião
 
-```env
-OLLAMA_MODEL=qwen3:1.7b
-```
+`POST /analises/{id}/chat`. Só abre com a análise em `DONE`, e só lê a própria
+reunião.
 
-O Docker Compose envia esse valor ao FastAPI como `MODEL`. O nome do modelo não
-fica fixo no código Python.
+1. **Perguntas sobre o card:** perguntas que batem com um campo do resumo (produto,
+   budget, dúvidas...) respondem direto do `final_summary`.
+2. **Busca híbrida:** passagens por vetor e por texto (`tsvector` em português),
+   fundidas por posição. Termos presentes em mais de 35% das passagens da reunião
+   são descartados. Uma segunda opinião traz a passagem com o termo mais raro da
+   pergunta.
+3. **Resposta:** o modelo responde só com as evidências. Se ele recusar, copiar a
+   pergunta ou um trecho, ou responder curto demais, há uma releitura com três
+   trechos.
+4. **Números:** números que não aparecem nas evidências derrubam a resposta.
+5. **Citações e histórico:** as citações são recortadas em torno da resposta (350
+   caracteres). A conversa fica em `ai.chat_messages` e volta ao reabrir a página.
 
-### Modelo de embedding
+## 6. API atual
 
-Responsável por transformar o conteúdo sanitizado em um vetor armazenado no
-pgvector.
+| Rota | Uso |
+|---|---|
+| `GET /health` | saúde |
+| `POST /analisar` | cria análise assíncrona |
+| `GET /analises/{id}`, `GET /analises/by-meeting/{meeting_id}` | status, progresso, resumo |
+| `GET /fila` | análises não terminadas e tempo estimado da fila |
+| `GET /estimativa?analyses=&chunks_each=` | custo de um lote ainda não enviado |
+| `GET /analises/{id}/estimativa` | tempo restante de uma análise |
+| `POST /analises/{id}/recompletar` | pede de novo, uma vez, os campos vazios de um card pronto |
+| `GET /analises/{id}/chunks` | chunks e resumos parciais |
+| `POST /analises/{id}/buscar` | busca híbrida |
+| `GET /analises/{id}/evidencias` | evidências por categoria |
+| `GET` e `POST /analises/{id}/chat` | histórico e nova pergunta |
 
-```env
-EMBEDDING_MODEL=nomic-embed-text
-EMBEDDING_DIM=768
-```
-
-A dimensão configurada precisa corresponder exatamente à dimensão retornada
-pelo modelo.
-
-### Instalação
-
-O instalador verifica os modelos definidos no ambiente:
-
-```bash
-./ia/install-model.sh
-```
-
-Quando um modelo não está instalado, o operador pode:
-
-1. baixar o modelo configurado;
-2. trocar o modelo no `.env`;
-3. cancelar a operação.
-
-Também é possível instalar diretamente:
-
-```bash
-docker compose exec ollama ollama pull qwen3:1.7b
-docker compose exec ollama ollama pull nomic-embed-text
-```
-
-Depois de alterar variáveis do serviço, é necessário recriar o container:
-
-```bash
-docker compose up -d --force-recreate ia-service
-```
-
----
-
-## 5. Thinking e limites de geração
-
-O thinking e o orçamento de saída são configurados separadamente por etapa:
-
-```env
-OLLAMA_CHUNK_THINK=true
-OLLAMA_CHUNK_NUM_PREDICT=768
-
-OLLAMA_CONSOLIDATION_THINK=true
-OLLAMA_CONSOLIDATION_NUM_PREDICT=1024
-```
-
-Essa separação permite equilibrar precisão, tempo e consumo de recursos.
-
-- O thinking do chunk influencia a extração inicial.
-- O thinking da consolidação só é utilizado quando há vários chunks.
-- `NUM_PREDICT` limita a quantidade máxima de tokens gerados.
-- A janela de contexto do modelo não representa a quantidade efetivamente
-  utilizada em toda requisição.
-
-O campo `total_tokens` atual representa apenas uma estimativa dos tokens da
-transcrição. Ele não inclui prompt, schema, thinking ou tokens de saída.
-
----
-
-## 6. Contrato atual da API
-
-### Criar análise
-
-```http
-POST /analisar
-```
-
-Exemplo:
-
-```json
-{
-  "meeting_id": "11111111-1111-1111-1111-111111111111",
-  "user_id": "22222222-2222-2222-2222-222222222222",
-  "title": "Reunião teste",
-  "transcription": "Cliente comentou dificuldade na integração com ERP."
-}
-```
-
-### Consultar análise
-
-```http
-GET /analises/{analysis_id}
-GET /analises/by-meeting/{meeting_id}
-```
-
-### Consultar chunks
-
-```http
-GET /analises/{analysis_id}/chunks
-```
-
-### Health check
-
-```http
-GET /health
-```
-
----
+As estimativas vêm do histórico desta máquina. Elas usam a mediana por número de
+chunks, sem uma reta única, e mudam depois de uma troca de modelo ou de hardware.
 
 ## 7. Dados persistidos
 
-### `ai.meeting_analyses`
-
-Armazena:
-
-- identificadores externos da reunião e do usuário;
-- título;
-- status;
-- quantidade estimada de tokens;
-- quantidade de chunks;
-- análise final;
-- mensagem de erro;
-- datas de criação e atualização.
-
-### `ai.meeting_chunks`
-
-Armazena:
-
-- índice do chunk;
-- conteúdo original;
-- conteúdo sanitizado;
-- quantidade estimada de tokens;
-- análise estruturada;
-- embedding;
-- referência à análise principal.
-
----
-
-## 8. Estados e erros atuais
-
-Estados utilizados:
-
-```text
-PROCESSING
-DONE
-FAILED
-```
-
-Quando ocorre uma falha:
-
-- a análise é marcada como `FAILED`;
-- `error_message` recebe uma descrição útil;
-- tokens e quantidade de chunks calculados antes da falha são preservados;
-- não existe fallback silencioso para dados mockados.
-
-Os logs registram tempos separados para:
-
-- análise de cada chunk;
-- geração de embedding;
-- consolidação;
-- falhas com stack trace.
-
----
-
-## 9. Limitações conhecidas
-
-- O endpoint ainda é síncrono e mantém a conexão aberta durante todo o
-  processamento.
-- `total_tokens` não representa o consumo real do Ollama.
-- A sanitização ainda usa regras simples.
-- Não existe retry automático por etapa.
-- Uma falha em embedding pode interromper toda a análise.
-- Não existe seleção de modelo pela interface.
-- Não existe reprocessamento parcial.
-- Não existe chatbot contextual da reunião.
-- Modelos pequenos podem cumprir o schema, mas ainda produzir análises pouco
-  precisas ou semanticamente inconsistentes.
-
----
-
-# 10. Roadmap futuro
-
-## Fase 1 — Seleção e troca de modelo
-
-### Objetivo
-
-Permitir que uma pessoa autorizada escolha o modelo usado na análise sem editar
-arquivos manualmente.
-
-### Funcionalidades planejadas
-
-- listar modelos instalados no Ollama;
-- exibir o modelo ativo;
-- selecionar outro modelo instalado;
-- solicitar download de um modelo permitido;
-- validar se o modelo está disponível antes do processamento;
-- mostrar tamanho, finalidade e status do download;
-- manter modelos de análise e embedding separados;
-- registrar qual modelo e quais configurações foram usados em cada análise.
-
-### API sugerida
-
-```http
-GET  /models
-GET  /models/active
-POST /models/pull
-PUT  /models/active
-```
-
-Exemplo de troca:
-
-```json
-{
-  "purpose": "analysis",
-  "model": "qwen3:4b"
-}
-```
-
-### Regras recomendadas
-
-- somente administradores podem trocar ou baixar modelos;
-- uma análise em andamento continua usando o modelo com que começou;
-- o modelo utilizado deve ser salvo junto ao resultado;
-- trocar o modelo não reprocessa reuniões antigas automaticamente;
-- modelos incompatíveis com embeddings devem ser recusados nessa finalidade.
-
-### Critérios de aceite
-
-- usuário autorizado consegue listar e selecionar modelos;
-- modelo inexistente gera orientação clara de instalação;
-- análises registram modelo, thinking e limites utilizados;
-- troca não afeta análises já iniciadas.
-
----
-
-## Fase 2 — Reprocessamento total e parcial
-
-### Objetivo
-
-Permitir corrigir apenas a etapa que falhou ou ficou incompleta, sem repetir
-trabalho válido desnecessariamente.
-
-### Estados por etapa
-
-Cada análise deverá acompanhar separadamente:
-
-```text
-SANITIZATION_PENDING
-SANITIZATION_DONE
-CHUNKING_PENDING
-CHUNKING_DONE
-SUMMARY_PENDING
-SUMMARY_DONE
-EMBEDDING_PENDING
-EMBEDDING_DONE
-CONSOLIDATION_PENDING
-CONSOLIDATION_DONE
-FAILED
-```
-
-Cada chunk também deverá guardar status próprio de resumo e embedding.
-
-### Modos de reprocessamento
-
-#### Reprocessar tudo
-
-Refaz sanitização, chunks, análises, embeddings e consolidação.
-
-```http
-POST /analises/{analysis_id}/reprocess
-```
-
-```json
-{
-  "mode": "full"
-}
-```
-
-#### Reprocessar somente itens ausentes
-
-Identifica etapas incompletas e executa apenas o necessário.
-
-```json
-{
-  "mode": "missing"
-}
-```
-
-Exemplos:
-
-- resumo existente e embedding ausente: gerar somente embedding;
-- chunks completos e consolidação ausente: consolidar novamente;
-- apenas um chunk com erro: reprocessar esse chunk e consolidar;
-- resultado criado com modelo antigo: permitir reprocessar com o modelo atual.
-
-#### Reprocessar etapa específica
-
-```json
-{
-  "mode": "stage",
-  "stage": "embedding"
-}
-```
-
-#### Reprocessar chunk específico
-
-```http
-POST /analises/{analysis_id}/chunks/{chunk_id}/reprocess
-```
-
-### Regras recomendadas
-
-- operações devem ser idempotentes;
-- dados válidos não devem ser apagados antes do novo resultado estar pronto;
-- manter histórico de tentativas e erros;
-- registrar modelo e configuração de cada tentativa;
-- limitar quantidade de retries automáticos;
-- permitir retry manual depois do limite;
-- impedir dois reprocessamentos simultâneos da mesma análise.
-
-### Critérios de aceite
-
-- partes válidas permanecem disponíveis durante o retry;
-- usuário consegue identificar exatamente a etapa que falhou;
-- modo `missing` não repete etapas concluídas;
-- erros e tentativas ficam auditáveis;
-- resultado final é recalculado quando algum chunk muda.
-
----
-
-## Fase 3 — Processamento assíncrono
-
-### Objetivo
-
-Evitar que o cliente mantenha uma requisição HTTP aberta por até um minuto ou
-mais.
-
-### Fluxo sugerido
-
-```text
-POST /analisar
-→ cria análise com status QUEUED
-→ retorna analysis_id imediatamente
-→ worker processa em segundo plano
-→ frontend consulta status ou recebe evento
-```
-
-Resposta inicial sugerida:
-
-```json
-{
-  "analysis_id": "uuid",
-  "status": "QUEUED"
-}
-```
-
-Consulta:
-
-```http
-GET /analises/{analysis_id}/status
-```
-
-Evoluções possíveis:
-
-- worker FastAPI separado;
-- Redis com Celery, RQ ou Dramatiq;
-- fila baseada no próprio PostgreSQL para o primeiro MVP;
-- Server-Sent Events ou WebSocket para progresso;
-- cancelamento de processamento;
-- prioridade por usuário ou reunião.
-
----
-
-## Fase 4 — Chatbot contextual da reunião
-
-### Objetivo
-
-Permitir perguntas e respostas baseadas exclusivamente no conteúdo de uma
-reunião analisada.
-
-### Fluxo RAG sugerido
-
-```text
-pergunta do usuário
-→ embedding da pergunta
-→ busca dos chunks semelhantes no pgvector
-→ montagem do contexto
-→ chamada ao modelo
-→ resposta com referências aos chunks
-```
-
-### API sugerida
-
-```http
-POST /analises/{analysis_id}/chat
-```
-
-Exemplo:
-
-```json
-{
-  "question": "Quais decisões foram tomadas sobre a integração com o ERP?"
-}
-```
-
-Resposta sugerida:
-
-```json
-{
-  "answer": "Foi decidido marcar uma reunião técnica na sexta-feira.",
-  "sources": [
-    {
-      "chunk_id": "uuid",
-      "chunk_index": 1,
-      "excerpt": "Foi decidido marcar uma reunião técnica sexta-feira.",
-      "similarity": 0.91
-    }
-  ]
-}
-```
-
-### Requisitos de precisão
-
-- responder somente com base nos chunks recuperados;
-- declarar quando não houver evidência suficiente;
-- citar chunks e trechos usados;
-- não misturar dados de reuniões diferentes;
-- validar permissão do usuário para acessar a reunião;
-- permitir configurar quantidade mínima e máxima de fontes;
-- registrar modelo e chunks utilizados na resposta.
-
-### Histórico de conversa
-
-Estrutura futura sugerida:
-
-```text
-ai.chat_sessions
-ai.chat_messages
-ai.chat_message_sources
-```
-
-O histórico deve guardar pergunta, resposta, modelo, fontes, duração e consumo
-de tokens.
-
-### Critérios de aceite
-
-- perguntas recuperam apenas chunks da análise selecionada;
-- respostas apresentam fontes verificáveis;
-- falta de contexto produz uma resposta explícita, sem invenção;
-- usuário sem permissão não acessa a reunião;
-- histórico pode ser retomado sem perder referências.
-
----
-
-## Fase 5 — Métricas reais e observabilidade
-
-### Objetivo
-
-Medir custo computacional, desempenho e qualidade de cada etapa.
-
-### Dados recomendados
-
-- `prompt_eval_count`;
-- `eval_count`;
-- tempo de carregamento do modelo;
-- tempo de avaliação do prompt;
-- tempo de geração;
-- tempo do embedding;
-- modelo e versão;
-- thinking utilizado;
-- limite de saída;
-- quantidade de retries;
-- erro por etapa;
-- tempo total real da análise.
-
-### Observabilidade
-
-- logs estruturados em JSON;
-- `analysis_id` em todas as mensagens;
-- métricas Prometheus;
-- tracing entre backend Java, FastAPI, Ollama e Postgres;
-- dashboard de latência por modelo;
-- alerta para análises presas ou com taxa elevada de falhas.
-
----
-
-## 11. Ordem recomendada de implementação
-
-```text
-1. Status por etapa e histórico de tentativas
-2. Reprocessamento de partes ausentes
-3. Processamento assíncrono
-4. Registro de modelo e métricas reais
-5. Seleção de modelo por usuário autorizado
-6. Busca vetorial por reunião
-7. Chatbot com fontes
-8. Histórico de conversas e observabilidade avançada
-```
-
-A base para o chatbot depende de embeddings confiáveis, filtros corretos por
-reunião e permissão de acesso. Por isso, reprocessamento, status detalhado e
-auditoria devem ser implementados antes da experiência de chat.
-
----
-
-## 12. Definição de sucesso
-
-O roadmap estará completo quando:
-
-- modelos puderem ser selecionados com segurança;
-- toda análise registrar sua configuração de execução;
-- falhas puderem ser retomadas somente a partir da etapa necessária;
-- o processamento não depender de uma conexão HTTP longa;
-- perguntas sobre uma reunião forem respondidas com fontes verificáveis;
-- nenhuma resposta utilizar dados de outra reunião;
-- métricas permitirem comparar precisão, latência e estabilidade por modelo.
+| Tabela | Conteúdo |
+|---|---|
+| `ai.meeting_analyses` | status, estágio do resumo, `final_summary`, contexto comercial (`source_metadata`), erro |
+| `ai.meeting_chunks` | conteúdo original e limpo, tokens, resumo do chunk, embedding legado |
+| `ai.chunk_passages` | passagens de ~400 tokens com embedding e `tsvector` |
+| `ai.analysis_submissions` | chave de idempotência, hash do payload, análise criada |
+| `ai.products` | catálogo TOTVS (302 produtos) com embedding |
+| `ai.chat_messages` | conversa por análise |
+
+As migrações vão de `0001` a `0008`, com `0007` = `chat_messages` e
+`0008` = `source_metadata`.
+
+## 8. Limitações conhecidas
+
+Medidas nas reuniões do CSV em 2026-09-12:
+
+- **Evidência parafraseada.** A consolidação só vê os resumos dos chunks, então o
+  trecho que ela cita costuma ser a frase do resumo. O filtro contra a transcrição
+  descarta esses trechos, e o card fica sem evidência: 0 evidências em 3 de 5
+  reuniões. Trocar pelo trecho mais parecido da transcrição não se sustentou na
+  calibração.
+- **Motivos super-declarados.** Houve oportunidade 85 numa reunião de cancelamento
+  e churn de 50 a 55 em reuniões de venda. A calibração com reuniões rotuladas
+  segue pendente.
+- **Persona.** Às vezes traz nome próprio ou marcador de anonimização
+  (`[PESSOA]`, `[LOCAL]`).
+- **Justificativas cortadas.** O texto para nos 240 caracteres do schema, às vezes
+  no meio da palavra. Os itens de lista já voltam à última frase completa; as
+  justificativas ainda não.
+- **Metadado inconsistente.** Há reunião marcada como `lead` no CSV que é de
+  cliente com contrato, e o contexto comercial repassa isso ao modelo.
+- **Reprocessamento manual.** Uma análise que termina em erro fica ligada à
+  reunião, e a carga do dataset não a reenvia.
+- **Fila.** Fica em memória, numa instância só. Não há coordenação entre réplicas
+  nem cancelamento.
+- **Tokens.** `total_tokens` é estimativa da transcrição, não o consumo real do
+  Ollama.
+
+## 9. Roadmap
+
+### Fase 1 — Seleção de modelo · pendente
+
+Listar os modelos instalados, trocar o modelo ativo sem editar o `.env` e registrar
+em cada análise o modelo e os limites usados. Uma análise em andamento termina com
+o modelo com que começou.
+
+### Fase 2 — Reprocessamento · parcial
+
+- **Feito:**
+  - retomada de chunks já resumidos depois de uma queda;
+  - `recompletar` para campos vazios de um card pronto.
+- **Pendente:**
+  - reprocessar uma análise que terminou em erro;
+  - refazer só uma etapa (embeddings, consolidação) ou um chunk;
+  - guardar o histórico de tentativas.
+
+### Fase 3 — Processamento assíncrono · feito
+
+- **Feito:** `POST /analisar` responde 202, e o worker processa em segundo plano com
+  retomada no startup. Há progresso por análise e estimativa de fila.
+- **Pendente:** fila persistente ou distribuída e cancelamento.
+
+### Fase 4 — Chat contextual · feito
+
+- **Feito:** RAG com fontes, isolado por análise, com releitura, checagem de números
+  e histórico persistido.
+- **Pendente:** guardar em cada mensagem as fontes e o modelo usados.
+
+### Fase 5 — Métricas e observabilidade · parcial
+
+- **Feito:** logs com `analysis_id` e tempo por etapa, e ETA calibrado pelo histórico.
+- **Pendente:**
+  - persistir `eval_count` e tempos do Ollama por chamada;
+  - métricas Prometheus;
+  - alerta para análise travada ou taxa alta de falha.
+
+### Fase 6 — Qualidade da análise · aberta
+
+- **Evidência literal:** dar à consolidação trechos da transcrição, e não só
+  resumos.
+- **Motivos:** calibrar a declaração de motivos contra reuniões rotuladas.
+- **Justificativas:** cortar na última frase completa, como já acontece nas listas.
+
+## 10. Ordem recomendada
+
+1. Qualidade da análise (fase 6): é o que o dashboard mostra hoje.
+2. Reprocessar análise com erro (fase 2), antes da carga completa do dataset.
+3. Registro de modelo e métricas por chamada (fases 1 e 5).
+4. Seleção de modelo pela interface (fase 1).
+5. Fila persistente e cancelamento (fase 3).

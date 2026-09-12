@@ -14,7 +14,7 @@ repassam.
 | # | Prompt | Arquivo | Modelo | Quando roda |
 |---|---|---|---|---|
 | 1 | Chat, primeira tentativa | `chat_service._build_prompt` | `MODEL` | uma vez por pergunta |
-| 2 | Chat, releitura | `chat_service._build_reread_prompt` | `MODEL` | só quando a 1ª recusa, copia a pergunta ou responde em <4 palavras |
+| 2 | Chat, releitura | `chat_service._build_reread_prompt` | `MODEL` | só quando a 1ª recusa, copia a pergunta ou um trecho, ou responde em <4 palavras |
 | 3 | Catálogo de motivos | `llm_service.MOTIVE_CATALOGUE` | — | fragmento injetado no #5 |
 | 4 | Catálogo de concorrentes | `llm_service.COMPETITOR_CATALOGUE` | — | fragmento injetado nos #5 e #6 |
 | 5 | Resumo por chunk | `llm_service.generate_chunk_summary` | `CHUNK_MODEL` | uma vez por chunk (até `MAX_LLM_CHUNKS=15`) |
@@ -23,10 +23,10 @@ repassam.
 | 8 | Classificação de produtos | `llm_service.classify_products` | `CONSOLIDATION_MODEL` | uma vez por análise, se `product_grounding_enabled` |
 | 9 | Reparo de JSON | inline em `llm_service._generate_json` | o mesmo da chamada que falhou | só quando o JSON volta inválido e `OLLAMA_JSON_REPAIR_ENABLED` |
 
-Hoje, no `.env` da raiz: `MODEL=qwen3.5:4b-q4_K_M`, `CHUNK_MODEL=qwen2.5:3b`,
-`CONSOLIDATION_MODEL=qwen3.5:4b-q4_K_M` — trocado de `gemma3:1b` em
-2026-09-10, junto com a GPU passando a ser usada pelo `ollama` (bloco `deploy`
-em `docker-compose.yml`; sem ele o Ollama rodava só em CPU mesmo com a GPU
+Hoje, no `.env` da raiz: `MODEL`, `CHUNK_MODEL` e `CONSOLIDATION_MODEL` em
+`qwen3.5:4b-q4_K_M` — trocados de `gemma3:1b` em 2026-09-10, junto com a GPU
+passando a ser usada pelo `ollama` (reserva em `docker-compose.gpu.yml`, ligada
+por `COMPOSE_FILE` no `.env`; sem ela o Ollama roda só em CPU mesmo com a GPU
 disponível na máquina). Ver "Onde ficam os parâmetros" no fim deste documento
 para os números que sustentam a troca.
 
@@ -36,7 +36,7 @@ para os números que sustentam a troca.
 
 **`ia/src/app/services/chat_service.py::_build_prompt`**
 Modelo `MODEL` · `temperature=CHAT_TEMPERATURE` (0.4) · `num_predict=512` ·
-`num_ctx=8192` · `think=false` · timeout 120s · sem `format` (texto livre)
+`num_ctx=CHAT_CONTEXT_LENGTH` (32768) · `think=false` · timeout 120s · sem `format` (texto livre)
 
 Recebe o histórico da conversa e as evidências recuperadas. Estrutura:
 
@@ -261,9 +261,10 @@ TRUST_DECLARED_MOTIVES=true
 OLLAMA_THINK=True             mas os três caminhos JSON passam think=false
 ```
 
-`OLLAMA_CHUNK_NUM_PREDICT` e `chunk_motive_classification` foram medidos contra
-o `gemma3:1b`, e ainda não foram remedidos contra o `qwen2.5:3b` que assumiu
-`CHUNK_MODEL` em 2026-09-10.
+`OLLAMA_CHUNK_NUM_PREDICT` foi remedido com o `qwen3.5:4b-q4_K_M` no chunk:
+nenhum truncamento em 256, 384 ou 512 (comentário em `config.py`). A medição de
+`chunk_motive_classification` (14 reuniões, 2,3x mais lento sem o catálogo) não
+registra com qual modelo foi feita.
 
 ## Troca de modelo — 2026-09-10
 

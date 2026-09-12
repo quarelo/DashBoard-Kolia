@@ -134,8 +134,16 @@ O CSV de saída tem 18 colunas corretamente separadas, transcrições com frases
 
 ## Arquivos Produzidos
 
-- `transcricoes_limpas.csv` — dataset tratado, pronto para a IA
-- `pipeline_totvs.py` — script Python com o pipeline completo, reproduzível com `python pipeline_totvs.py caminho/do/csv/original.csv caminho/de/saida.csv`
+- `transcricoes_limpas.csv` — dataset tratado, pronto para a IA. No repositório ele
+  corresponde ao `transcricoes_TOTVS.csv`, na raiz e fora do git (`.gitignore`),
+  carregado com `make reunioes`.
+- `pipeline_totvs.py` — script Python com o pipeline completo, reproduzível com `python pipeline_totvs.py caminho/do/csv/original.csv caminho/de/saida.csv`. Não está versionado neste repositório.
+
+Conferido em 2026-09-12 no `transcricoes_TOTVS.csv`: 1.044 reuniões, nenhum
+`ID_MEETING` repetido, nenhuma transcrição vazia, de 87 a 29.830 palavras (mediana
+5.670). 194 linhas têm transcrição idêntica à de outra linha, com metadados
+diferentes: a deduplicação da etapa 2 exigia `CODT`, duração e data de criação
+iguais. O backend trata cada uma como reunião própria, com análise própria.
 
 COLUNAS
 Campo	Significado

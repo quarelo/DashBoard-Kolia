@@ -82,6 +82,16 @@ popular dropdowns no frontend:
 }
 ```
 
+### Onde os metadados aparecem hoje
+
+- Os mesmos filtros existem em `GET /api/dashboard/overview`, `/executive` e
+  `/meetings`, que leem `ai.meeting_analyses` com `LEFT JOIN core.meetings`.
+- A página da reunião mostra os 16 campos numa grade, lidos de
+  `core.meetings.source_metadata`. Uma análise enviada direto à IA, sem passar pelo
+  import, não tem essa linha. Ela aparece sem grade e sem transcrição, e só o
+  diretor comercial a exclui, mesmo com os 5 campos de contexto guardados em
+  `ai.meeting_analyses.source_metadata`.
+
 ---
 
 ## Campos armazenados sem uso ativo (6)
