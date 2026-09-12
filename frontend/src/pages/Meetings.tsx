@@ -1,9 +1,11 @@
 import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Search, ChevronRight, ChevronDown, Filter, Layers, Users, Calendar, CheckCircle2, Loader2,
+  Search, ChevronRight, ChevronDown, Filter, Layers, Users, Calendar, CheckCircle2, Loader2, Trash2,
 } from "lucide-react";
 import { useAsync } from "../lib/useAsync";
+import { useAuth } from "../context/AuthContext";
+import { DeleteMeetingDialog } from "../components/meetings/DeleteMeetingDialog";
 import { dashboardService, sentimentLabels, sentimentTone, statusLabel } from "../services/dashboardService";
 import { PageError, PageLoader, EmptyState } from "../components/ui/PageState";
 import { ScoreBar } from "../components/ui/ScoreBar";
@@ -39,7 +41,7 @@ function StatusChip({ status, isFinal }: { status: string; isFinal: boolean }) {
   );
 }
 
-function MeetingCard({ item }: { item: AnalysisListItem }) {
+function MeetingCard({ item, onDelete }: { item: AnalysisListItem; onDelete?: () => void }) {
   const navigate = useNavigate();
   return (
     <div
@@ -98,7 +100,20 @@ function MeetingCard({ item }: { item: AnalysisListItem }) {
             {item.personas.slice(0, 3).join(", ")}
           </span>
         ) : <span />}
-        <ChevronRight size={15} className="text-gray-300 group-hover:text-brand transition-colors" />
+        <div className="flex items-center gap-1">
+          {onDelete && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              title="Excluir reunião"
+              aria-label="Excluir reunião"
+              className="p-1.5 rounded-md text-gray-300 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
+          <ChevronRight size={15} className="text-gray-300 group-hover:text-brand transition-colors" />
+        </div>
       </div>
     </div>
   );
@@ -120,8 +135,15 @@ export function Meetings() {
   const [sentimentFilter, setSentimentFilter] = useState("all");
   const [sortField, setSortField] = useState<"date" | "riskScore" | "opportunityScore">("date");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const { user } = useAuth();
+  const [deleting, setDeleting] = useState<AnalysisListItem | null>(null);
+  // Tira da tela na hora, sem recarregar a lista inteira depois de cada exclusão.
+  const [removedIds, setRemovedIds] = useState<Set<string>>(() => new Set());
 
-  const items = useMemo(() => data?.items ?? [], [data]);
+  const items = useMemo(
+    () => (data?.items ?? []).filter((m) => !removedIds.has(m.analysisId)),
+    [data, removedIds],
+  );
 
   const filtered = useMemo(() => {
     let rows = [...items];
@@ -230,8 +252,27 @@ export function Meetings() {
         </div>
       ) : (
         <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {filtered.map((item) => <MeetingCard key={item.analysisId} item={item} />)}
+          {filtered.map((item) => (
+            <MeetingCard
+              key={item.analysisId}
+              item={item}
+              // Análise sem importação: só o diretor comercial exclui; o backend confere o resto.
+              onDelete={user?.role === "SALES_DIRECTOR" || item.meetingId !== null ? () => setDeleting(item) : undefined}
+            />
+          ))}
         </div>
+      )}
+
+      {deleting && (
+        <DeleteMeetingDialog
+          analysisId={deleting.analysisId}
+          title={deleting.title}
+          onClose={() => setDeleting(null)}
+          onDeleted={() => {
+            setRemovedIds((ids) => new Set(ids).add(deleting.analysisId));
+            setDeleting(null);
+          }}
+        />
       )}
     </div>
   );
