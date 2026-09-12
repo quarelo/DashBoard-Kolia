@@ -50,9 +50,8 @@ def dashboard_overview(
     )
 
 
-@router.get("/meetings/top")
-def dashboard_top_risk_opportunity(
-    limit: int = Query(5, ge=1, le=20, description="Quantidade de itens por ranking (default 5)."),
+@router.get("/executive")
+def dashboard_executive(
     uf: str | None = Query(None, description="Filtra por UF (estado), ex: SP, RJ."),
     segmento: str | None = Query(None, description="Filtra por NOME_SEGMENTO (contém, case-insensitive)."),
     unidade: str | None = Query(None, description="Filtra por NOME_UNIDADE (contém, case-insensitive)."),
@@ -63,10 +62,14 @@ def dashboard_top_risk_opportunity(
     _user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return analysis_read.top_risk_and_opportunity(
-        db, limit, uf=uf, segmento=segmento, unidade=unidade,
-        formato=formato, cnae=cnae, dt_meeting_from=dt_meeting_from,
-        dt_meeting_to=dt_meeting_to,
+    """KPIs, comparativos e rankings para a Dashboard Executiva.
+
+    Mesma fonte e os mesmos filtros de ``/overview``: leitura sobre
+    ``ai.meeting_analyses`` já processada, sem chamar o serviço de IA.
+    """
+    return analysis_read.executive_overview(
+        db, uf=uf, segmento=segmento, unidade=unidade, formato=formato,
+        cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
     )
 
 
