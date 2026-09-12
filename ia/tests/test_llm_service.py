@@ -22,6 +22,94 @@ def client_for(handler):
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
+def test_open_questions_drop_greetings_confirmations_tags_and_labels():
+    """Medido no banco em uso: 4 de 10 análises mostravam no card itens como
+    "[L5]: Fala seu [PESSOA], tudo bem?" e "DÚVIDA: [L13]: Você falou do migrar de
+    ambiente do local para nuvens, isso?" — fala crua, com tag de locutor e o
+    rótulo interno do chunk.
+    """
+    from src.app.services.llm_service import clean_open_questions
+
+    items = [
+        "[L5]: Fala seu [PESSOA], tudo bem?",
+        "DÚVIDA: [L13]: Você falou do migrar de ambiente do local para nuvens, isso?",
+        "[L7]: Olá, tudo bem?",
+        "Bem-vinda para a [EMPRESA], né?",
+        "DÚVIDA: Como fica a migração dos pedidos antigos para a nuvem?",
+    ]
+
+    assert clean_open_questions(items) == [
+        "Como fica a migração dos pedidos antigos para a nuvem?"
+    ]
+
+
+def test_open_questions_keep_a_written_question_and_drop_duplicates():
+    """Um item que o LLM escreveu, mesmo sem "?", é o que o card deve mostrar."""
+    from src.app.services.llm_service import clean_open_questions
+
+    question = "Se as licenças do CRM e ERP são compartilhadas ou nomeadas."
+
+    assert clean_open_questions([question, question.upper(), None, ""]) == [question]
+
+
+def test_open_questions_about_an_anonymized_name_are_dropped():
+    """Medido na reunião curta: mesmo com uma regra no prompt contra perguntar por
+    dado anonimizado, a consolidação escreveu "Quem é o [LOCAL]?". Um ponto em aberto
+    de verdade que só cita o marcador continua.
+    """
+    from src.app.services.llm_service import clean_open_questions
+
+    kept = (
+        "O cliente confirmou que a migração para o ambiente Prime pode ser "
+        "executada no próximo fim de semana?"
+    )
+    cited = "O [PESSOA] vai aprovar a proposta até sexta?"
+
+    assert clean_open_questions(["Quem é o [LOCAL]?", kept, cited]) == [kept, cited]
+
+
+def test_consolidation_prompt_asks_for_written_open_questions():
+    """Numa reunião de 5 chunks a consolidação copiou os pontos de DÚVIDA como
+    estavam, rótulo e tag de locutor incluídos; o prompt não dizia nada do campo.
+    """
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["prompt"] = json.loads(request.content)["prompt"]
+        return httpx.Response(200, json={"response": json.dumps({"produto": []})})
+
+    consolidate_summaries(
+        [{"pontos_chave": ["DÚVIDA: [L13]: Qual é o prazo de implantação?"]}],
+        client=client_for(handler),
+    )
+
+    assert "nunca copie falas da transcrição" in seen["prompt"].lower()
+
+
+def test_refilled_open_questions_are_cleaned():
+    """O recompletar pede ao LLM só os campos vazios, a partir dos resumos de
+    chunk, e ele devolvia os pontos como estavam: "DÚVIDA: [L13]: ...".
+    """
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"response": json.dumps({
+            "duvidas_em_aberto": [
+                "DÚVIDA: [L13]: Você falou do migrar de ambiente do local para nuvens, isso?",
+                "DÚVIDA: Como fica a migração dos pedidos antigos para a nuvem?",
+            ],
+        }, ensure_ascii=False)})
+
+    result = complete_missing_fields(
+        {"duvidas_em_aberto": []},
+        [{"pontos_chave": ["DÚVIDA: [L13]: Você falou do migrar de ambiente?"]}],
+        include_empty=True,
+        client=client_for(handler),
+    )
+
+    assert result["duvidas_em_aberto"] == [
+        "Como fica a migração dos pedidos antigos para a nuvem?"
+    ]
+
+
 def test_generate_chunk_summary_uses_configured_model_and_decodes_json(monkeypatch):
     monkeypatch.setattr(settings, "chunk_model", "modelo-chunk:latest")
     monkeypatch.setattr(settings, "ollama_keep_alive", "30m")

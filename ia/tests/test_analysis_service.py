@@ -260,6 +260,21 @@ def test_evidence_that_is_not_in_the_transcript_is_dropped():
     assert [item["categoria"] for item in kept] == ["literal", "curta"]
 
 
+def test_open_questions_on_the_card_are_not_transcript_lines():
+    """Medido no banco em uso: uma reunião de 1 chunk mostrava em Dúvidas em Aberto
+    "[L7]: Olá, tudo bem?" e "Bem-vinda para a [EMPRESA], né?".
+    """
+    result = analysis_service.build_compact_final_summary([{
+        "pontos_chave": [
+            "DÚVIDA: [L7]: Olá, tudo bem?",
+            "DÚVIDA: Bem-vinda para a [EMPRESA], né?",
+            "DÚVIDA: [L13]: Qual é o prazo de implantação do CRM?",
+        ]
+    }])
+
+    assert result["duvidas_em_aberto"] == ["Qual é o prazo de implantação do CRM?"]
+
+
 def test_prepare_analysis_persists_preliminary_summary():
     session = FakeSession()
     payload = AnalyzeRequest(
@@ -290,18 +305,23 @@ def test_analyze_meeting_persists_real_ollama_results(monkeypatch):
     embedding = [0.25] * 768
 
     monkeypatch.setattr(
-        analysis_service, "generate_chunk_summary", lambda _text: chunk_summary
+        analysis_service, "generate_chunk_summary", lambda _text, **_kwargs: chunk_summary
     )
     monkeypatch.setattr(
-        analysis_service, "generate_embedding", lambda _text: embedding
+        analysis_service, "generate_embedding", lambda _text, **_kwargs: embedding
     )
-    monkeypatch.setattr(
-        analysis_service,
-        "consolidate_summaries",
-        lambda _summaries: (_ for _ in ()).throw(
-            AssertionError("um único chunk não deve ser reinterpretado")
-        ),
-    )
+    consolidated = []
+
+    def fake_consolidate(summaries, **_kwargs):
+        # A one-chunk meeting is consolidated too: the regex's "?" sentences were
+        # reaching Dúvidas em Aberto as they were said, not as open points.
+        consolidated.append(summaries)
+        return {
+            **analysis_service.build_compact_final_summary(summaries),
+            "duvidas_em_aberto": ["Quem do cliente participa da reunião técnica?"],
+        }
+
+    monkeypatch.setattr(analysis_service, "consolidate_summaries", fake_consolidate)
     session = FakeSession()
     payload = AnalyzeRequest(
         meeting_id=UUID("11111111-1111-1111-1111-111111111111"),
@@ -323,6 +343,10 @@ def test_analyze_meeting_persists_real_ollama_results(monkeypatch):
         for point in stored_chunk.chunk_summary["pontos_chave"]
     )
     assert stored_chunk.embedding == embedding
+    assert len(consolidated) == 1 and len(consolidated[0]) == 1
+    assert result.final_summary["duvidas_em_aberto"] == [
+        "Quem do cliente participa da reunião técnica?"
+    ]
     assert "Dificuldade na integração com ERP" in result.final_summary["problemas_identificados"]
     assert "Realizar reunião técnica" in result.final_summary["recomendacao_acao"]
     assert set(result.final_summary) == {
@@ -339,7 +363,7 @@ def test_failed_analysis_keeps_counts_and_useful_error(monkeypatch):
     monkeypatch.setattr(
         analysis_service,
         "generate_chunk_summary",
-        lambda _text: (_ for _ in ()).throw(RuntimeError("JSON inválido")),
+        lambda _text, **_kwargs: (_ for _ in ()).throw(RuntimeError("JSON inválido")),
     )
     session = FakeSession()
     payload = AnalyzeRequest(
@@ -361,7 +385,7 @@ def test_prepare_analysis_persists_chunks_without_calling_ollama(monkeypatch):
     monkeypatch.setattr(
         analysis_service,
         "generate_chunk_summary",
-        lambda _text: (_ for _ in ()).throw(
+        lambda _text, **_kwargs: (_ for _ in ()).throw(
             AssertionError("preparation must not call Ollama")
         ),
     )
@@ -412,7 +436,7 @@ def test_prepare_analysis_uses_full_cleaned_transcription(monkeypatch):
     monkeypatch.setattr(
         analysis_service,
         "clean_transcription",
-        lambda text: calls.append(text) or "conteúdo completo limpo",
+        lambda text, **_kwargs: calls.append(text) or "conteúdo completo limpo",
     )
     session = FakeSession()
     payload = AnalyzeRequest(
@@ -432,7 +456,7 @@ def test_pending_summaries_overlap_when_concurrency_is_two(monkeypatch):
     active = 0
     peak_active = 0
 
-    def generate(text):
+    def generate(text, **_kwargs):
         nonlocal active, peak_active
         with lock:
             active += 1
@@ -510,7 +534,7 @@ def test_summary_worker_honours_max_llm_chunks(monkeypatch):
     monkeypatch.setattr(
         analysis_service,
         "generate_chunk_summary",
-        lambda text: calls.append(text) or {"pontos_chave": ["EVIDÊNCIA: trecho"]},
+        lambda text, **_kwargs: calls.append(text) or {"pontos_chave": ["EVIDÊNCIA: trecho"]},
     )
     monkeypatch.setattr(
         analysis_service,
@@ -555,7 +579,11 @@ def test_product_grounding_replaces_produto_with_the_catalogue_answer(monkeypatc
     monkeypatch.setattr(
         analysis_service,
         "generate_chunk_summary",
-        lambda _text: {"pontos_chave": ["PRODUTO: CRM de vendas"]},
+        lambda _text, **_kwargs: {"pontos_chave": ["PRODUTO: CRM de vendas"]},
+    )
+    monkeypatch.setattr(
+        analysis_service, "consolidate_summaries",
+        lambda summaries, **_kwargs: analysis_service.build_compact_final_summary(summaries),
     )
     seen = {}
 
@@ -600,7 +628,11 @@ def test_product_grounding_is_skipped_when_no_product_was_even_mentioned(monkeyp
     monkeypatch.setattr(
         analysis_service,
         "generate_chunk_summary",
-        lambda _text: {"pontos_chave": ["AÇÃO: combinar próxima reunião"]},
+        lambda _text, **_kwargs: {"pontos_chave": ["AÇÃO: combinar próxima reunião"]},
+    )
+    monkeypatch.setattr(
+        analysis_service, "consolidate_summaries",
+        lambda summaries, **_kwargs: analysis_service.build_compact_final_summary(summaries),
     )
     monkeypatch.setattr(
         analysis_service,
@@ -826,12 +858,12 @@ def test_resume_summaries_skips_completed_chunks(monkeypatch):
     monkeypatch.setattr(
         analysis_service,
         "generate_chunk_summary",
-        lambda text: calls.append(text) or {**complete, "resumo_chunk": text},
+        lambda text, **_kwargs: calls.append(text) or {**complete, "resumo_chunk": text},
     )
     monkeypatch.setattr(
         analysis_service,
         "consolidate_summaries",
-        lambda summaries: {"resumo_geral": ", ".join(s["resumo_chunk"] for s in summaries)},
+        lambda summaries, **_kwargs: {"resumo_geral": ", ".join(s["resumo_chunk"] for s in summaries)},
     )
     monkeypatch.setattr(
         analysis_service, "complete_missing_fields", lambda summary, _chunks: summary
@@ -893,12 +925,12 @@ def test_llm_consolidation_score_comes_from_the_motive_table(monkeypatch):
         pending,
     ])
     monkeypatch.setattr(
-        analysis_service, "generate_chunk_summary", lambda _text: dict(summary)
+        analysis_service, "generate_chunk_summary", lambda _text, **_kwargs: dict(summary)
     )
     monkeypatch.setattr(
         analysis_service,
         "consolidate_summaries",
-        lambda _summaries: {
+        lambda _summaries, **_kwargs: {
             "resumo_geral": "consolidado pelo modelo",
             "risco_churn": {"score": 90, "justificativa": "palpite do modelo"},
             "score_oportunidade": {"score": 75, "justificativa": "palpite do modelo"},
@@ -957,7 +989,7 @@ def test_resume_embeddings_skips_chunks_that_are_fully_indexed(monkeypatch):
     monkeypatch.setattr(
         analysis_service,
         "generate_embedding",
-        lambda text: calls.append(text) or [0.2] * 768,
+        lambda text, **_kwargs: calls.append(text) or [0.2] * 768,
     )
 
     result = analysis_service.process_analysis_embeddings(session, analysis_id)
@@ -1000,7 +1032,7 @@ def test_embedding_failure_preserves_dashboard(monkeypatch):
     monkeypatch.setattr(
         analysis_service,
         "generate_embedding",
-        lambda _text: (_ for _ in ()).throw(RuntimeError("embedding indisponível")),
+        lambda _text, **_kwargs: (_ for _ in ()).throw(RuntimeError("embedding indisponível")),
     )
 
     result = analysis_service.process_analysis_embeddings(session, analysis_id)
@@ -1029,7 +1061,7 @@ def test_chunk_with_a_vector_but_no_passages_gets_indexed(monkeypatch):
     )
     session = FakeSession()
     session.added.extend([analysis, legado])
-    monkeypatch.setattr(analysis_service, "generate_embedding", lambda text: [0.3] * 768)
+    monkeypatch.setattr(analysis_service, "generate_embedding", lambda text, **_kwargs: [0.3] * 768)
 
     analysis_service.process_analysis_embeddings(session, analysis_id)
 
@@ -1060,7 +1092,7 @@ def test_multi_passage_chunk_does_not_pay_for_a_chunk_vector(monkeypatch):
     session.added.extend([analysis, longo])
     calls = []
     monkeypatch.setattr(analysis_service, "generate_embedding",
-                        lambda text: calls.append(text) or [0.4] * 768)
+                        lambda text, **_kwargs: calls.append(text) or [0.4] * 768)
 
     analysis_service.process_analysis_embeddings(session, analysis_id)
 
