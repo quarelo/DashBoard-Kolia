@@ -275,6 +275,22 @@ def test_open_questions_on_the_card_are_not_transcript_lines():
     assert result["duvidas_em_aberto"] == ["Qual é o prazo de implantação do CRM?"]
 
 
+def test_card_during_processing_has_no_speaker_tags_in_problems():
+    """Reunião 1263093 do CSV, enquanto processava: o card mostrava "[L19]: assim, é
+    inviável hoje o pessoal do fiscal dando [L66]: manutenção..."."""
+    result = analysis_service.build_compact_final_summary([{
+        "pontos_chave": [
+            "PROBLEMA: [L19]: assim, é inviável hoje o pessoal do fiscal dando "
+            "[L66]: manutenção colocando produto a produto lá dentro do [LOCAL].",
+        ]
+    }])
+
+    assert result["problemas_identificados"] == [
+        "assim, é inviável hoje o pessoal do fiscal dando manutenção colocando "
+        "produto a produto lá dentro do [LOCAL]."
+    ]
+
+
 def test_prepare_analysis_persists_preliminary_summary():
     session = FakeSession()
     payload = AnalyzeRequest(

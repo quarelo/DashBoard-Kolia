@@ -68,6 +68,55 @@ def test_open_questions_about_an_anonymized_name_are_dropped():
     assert clean_open_questions(["Quem é o [LOCAL]?", kept, cited]) == [kept, cited]
 
 
+def test_card_items_lose_tags_trailing_separators_and_a_cut_tail():
+    """Medido na reunião 1263093 do CSV: um item parou nos 180 caracteres do schema
+    em "(48h", e outros terminaram em "(48h úteis).," e "regras),"."""
+    from src.app.services.llm_service import _FINAL_ITEM_MAX_CHARS, clean_card_items
+
+    cut = (
+        "Falta de automação: o sistema atual exige mais configuração do que gera "
+        "benefício, causando retrabalho repetitivo de dados (data entry). Lentidão no "
+        "retorno do time de produto (48h"
+    )
+    assert len(cut) == _FINAL_ITEM_MAX_CHARS
+
+    assert clean_card_items([
+        cut,
+        "Processo de validação de regras é excessivamente lento (48h úteis).,",
+        "Falta de capacidade de parametrização rápida (ex: 48h para validar regras),",
+        "[L19]: assim, é inviável hoje o pessoal do fiscal dando [L66]: manutenção.",
+        "PROBLEMA: Sem teste",
+        "Sem teste",
+    ], cut_at=_FINAL_ITEM_MAX_CHARS) == [
+        "Falta de automação: o sistema atual exige mais configuração do que gera "
+        "benefício, causando retrabalho repetitivo de dados (data entry).",
+        "Processo de validação de regras é excessivamente lento (48h úteis).",
+        "Falta de capacidade de parametrização rápida (ex: 48h para validar regras)",
+        "assim, é inviável hoje o pessoal do fiscal dando manutenção.",
+        "Sem teste",
+    ]
+
+
+def test_a_long_deterministic_item_is_not_cut_as_if_the_grammar_stopped_it():
+    """Só o tamanho exato do schema indica corte; sem `cut_at`, nada é encurtado."""
+    from src.app.services.llm_service import clean_card_items
+
+    long_item = "Cliente relata que " + "a parametrização demora " * 10 + "demais"
+
+    assert clean_card_items([long_item]) == [long_item]
+
+
+def test_final_card_text_fields_are_cleaned_without_calling_the_model():
+    from src.app.services.llm_service import FINAL_SUMMARY_SCHEMA, complete_missing_fields
+
+    summary = {name: [] for name in FINAL_SUMMARY_SCHEMA["required"]}
+    summary["gap_produto"] = ["Inexistência de cadastro único entre matrizes,"]
+
+    result = complete_missing_fields(summary, [])
+
+    assert result["gap_produto"] == ["Inexistência de cadastro único entre matrizes"]
+
+
 def test_consolidation_prompt_asks_for_written_open_questions():
     """Numa reunião de 5 chunks a consolidação copiou os pontos de DÚVIDA como
     estavam, rótulo e tag de locutor incluídos; o prompt não dizia nada do campo.
