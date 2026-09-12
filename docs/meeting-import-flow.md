@@ -135,6 +135,22 @@ Busca continua isolada por `analysis_id`, com distância cosseno, limiar,
 evidências/citações e fallback sem suporte. Não alteramos modelo, dimensão de
 vetor, limites de chunks ou heurísticas de recuperação.
 
+## Carga do CSV inteiro
+
+`transcricoes_TOTVS.csv` tem 38 MiB e 1.044 reuniões, acima dos limites de um
+upload. `make reunioes` roda `backend/scripts/load_dataset.py` no container do
+backend:
+
+1. divide o CSV em partes abaixo dos dois limites e valida cada uma com o parser do
+   backend antes de enviar;
+2. importa as partes com a conta de `KOLIA_EMAIL`/`KOLIA_PASSWORD` do `.env`;
+3. dispara uma análise por vez e espera cada uma chegar em `DONE`, mostrando o tempo
+   médio e quanto falta.
+
+A divisão é sempre a mesma, então rodar de novo reenvia partes idênticas, que voltam
+como `DUPLICATE_IMPORT`, e as reuniões concluídas são puladas. `make reunioes-plano`
+só divide e valida; `make reunioes LIMIT=5` é um ensaio curto.
+
 ## Reprocessamento e versões
 
 Quando um `external_id` já importado chega com transcrição diferente, o registro
