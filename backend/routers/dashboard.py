@@ -24,6 +24,14 @@ _MAX_HISTORY = 6
 _MAX_TURN_CHARS = 1000
 
 
+@router.get("/executive")
+def dashboard_executive(
+    _user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return analysis_read.executive_overview(db)
+
+
 @router.get("/overview")
 def dashboard_overview(
     uf: str | None = Query(None, description="Filtra por UF (estado), ex: SP, RJ."),

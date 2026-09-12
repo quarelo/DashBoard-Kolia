@@ -228,6 +228,138 @@ def top_risk_and_opportunity(
     }
 
 
+def _parse_duration(value: Any) -> float | None:
+    if not value:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        minutes = float(s)
+        if minutes >= 0:
+            return minutes
+        return None
+    except ValueError:
+        pass
+    parts = s.split(":")
+    if len(parts) in (2, 3):
+        try:
+            hours = float(parts[0])
+            mins = float(parts[1])
+            secs = float(parts[2]) if len(parts) == 3 else 0
+            return hours * 60 + mins + secs / 60
+        except ValueError:
+            pass
+    return None
+
+
+def executive_overview(db: Session) -> dict:
+    rows = db.execute(text(_BASE_SELECT)).all()
+
+    durations: list[float] = []
+    product_counts: dict[str, int] = {}
+    product_metrics: dict[str, dict[str, int]] = {}
+    monthly: dict[str, dict[str, Any]] = {}
+    segment_counts: dict[str, int] = {}
+    segment_risk_opp: dict[str, dict[str, Any]] = {}
+    uf_data: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        item = to_list_item(row)
+        fs = row.final_summary if isinstance(row.final_summary, dict) else {}
+        metadata = row.meeting_metadata or {}
+
+        dur = _parse_duration(metadata.get("DURACAO_MEETING"))
+        if dur is not None:
+            durations.append(dur)
+
+        reclamacoes = len(_as_list(fs.get("problemas_identificados")))
+        gaps = len(_as_list(fs.get("gap_produto")))
+        elogios = len(_as_list(fs.get("feedback_produto")))
+        for product in item["products"]:
+            product_counts[product] = product_counts.get(product, 0) + 1
+            if product not in product_metrics:
+                product_metrics[product] = {"reclamacoes": 0, "gaps": 0, "elogios": 0}
+            product_metrics[product]["reclamacoes"] += reclamacoes
+            product_metrics[product]["gaps"] += gaps
+            product_metrics[product]["elogios"] += elogios
+
+        dt = str(metadata.get("DT_MEETING", ""))
+        month = dt[:7] if len(dt) >= 7 else ""
+        if month:
+            if month not in monthly:
+                monthly[month] = {"reunioes": 0, "risk_sum": 0.0, "opp_sum": 0.0}
+            monthly[month]["reunioes"] += 1
+            monthly[month]["risk_sum"] += item["risk_score"]
+            monthly[month]["opp_sum"] += item["opportunity_score"]
+
+        segmento = str(metadata.get("NOME_SEGMENTO", "")).strip()
+        if segmento:
+            segment_counts[segmento] = segment_counts.get(segmento, 0) + 1
+            if segmento not in segment_risk_opp:
+                segment_risk_opp[segmento] = {"risk_sum": 0.0, "opp_sum": 0.0, "count": 0}
+            segment_risk_opp[segmento]["risk_sum"] += item["risk_score"]
+            segment_risk_opp[segmento]["opp_sum"] += item["opportunity_score"]
+            segment_risk_opp[segmento]["count"] += 1
+
+        uf = str(metadata.get("UF", "")).strip()
+        if uf:
+            if uf not in uf_data:
+                uf_data[uf] = {"risk_sum": 0.0, "count": 0}
+            uf_data[uf]["risk_sum"] += item["risk_score"]
+            uf_data[uf]["count"] += 1
+
+    top_product = max(product_counts.items(), key=lambda x: x[1]) if product_counts else ("", 0)
+
+    comparativo = sorted([
+        {
+            "mes": mes,
+            "reunioes": d["reunioes"],
+            "risco_medio": round(d["risk_sum"] / d["reunioes"], 1),
+            "oportunidade_media": round(d["opp_sum"] / d["reunioes"], 1),
+        }
+        for mes, d in monthly.items()
+    ], key=lambda x: x["mes"])[-4:]
+
+    top_produtos = sorted([
+        {"nome": nome, **product_metrics[nome]}
+        for nome in product_metrics
+    ], key=lambda x: product_counts[x["nome"]], reverse=True)[:5]
+
+    top_segmentos = sorted([
+        {"segmento": seg, "reunioes": count}
+        for seg, count in segment_counts.items()
+    ], key=lambda x: x["reunioes"], reverse=True)[:5]
+
+    top_uf = sorted([
+        {"uf": uf, "risco_medio": round(d["risk_sum"] / d["count"], 1), "reunioes": d["count"]}
+        for uf, d in uf_data.items()
+    ], key=lambda x: x["risco_medio"], reverse=True)[:5]
+
+    risco_opp = sorted([
+        {
+            "segmento": seg,
+            "risco_medio": round(d["risk_sum"] / d["count"], 1),
+            "oportunidade_media": round(d["opp_sum"] / d["count"], 1),
+        }
+        for seg, d in segment_risk_opp.items()
+    ], key=lambda x: x["risco_medio"], reverse=True)
+
+    return {
+        "kpis": {
+            "total_reunioes": len(rows),
+            "duracao_media_minutos": round(sum(durations) / len(durations), 1) if durations else 0.0,
+            "produto_mais_citado": top_product[0],
+            "mencoes_produto_mais_citado": top_product[1],
+        },
+        "comparativo_mensal": comparativo,
+        "top_produtos": top_produtos,
+        "top_segmentos": top_segmentos,
+        "top_uf_risco": top_uf,
+        "risco_oportunidade_segmento": risco_opp,
+    }
+
+
 def overview(
     db: Session,
     recent_limit: int = 5,
