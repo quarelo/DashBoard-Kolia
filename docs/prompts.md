@@ -740,3 +740,30 @@ o campo for regravado.
 chamar `generate_chunk_summary` e `consolidate_summaries` com `metadata_context=`,
 e os mocks aceitavam só o texto. Os mocks agora aceitam os argumentos novos; 287
 testes passam no compose e do jeito que a CI roda.
+
+### Os outros campos de texto do card — reunião 1263093 do CSV
+
+Rodada no banco em uso, em 4 chunks e 157s. O raciocínio da IA ficou como está, por
+decisão do time; só o que era defeito de código mudou.
+
+- **Fala crua durante o processamento.** Enquanto a análise rodava, Problemas
+  Identificados mostrava *"[L19]: assim, é inviável hoje o pessoal do fiscal dando
+  [L66]: manutenção..."*. `clean_card_items` tira tag de locutor e rótulo de
+  categoria de oportunidade, gap, problemas, feedback e ações, no resumo preliminar,
+  no parcial e no final. Diferente das dúvidas, não descarta item curto.
+- **Item cortado.** *"... Lentidão no retorno do time de produto (48h"* tinha
+  exatamente 180 caracteres, o `maxLength` do `FINAL_LIST_SCHEMA`: a gramática
+  parou a string no meio. Um item com exatamente esse tamanho e sem pontuação final
+  volta até a última frase completa. Item determinístico mais longo não é cortado,
+  porque o critério é o tamanho exato do schema.
+- **Vírgula no fim.** O modelo escreveu *"(48h úteis).,"* e *"regras),"*; o
+  separador final sai.
+
+**Evidências vazias ficaram como estão.** A consolidação devolveu 5 evidências, e
+o `trecho` de todas era a frase do resumo do chunk (*"Cliente expressa intenção de
+rescindir contrato..."*), não da transcrição, então `_quoted_evidence` descartou as
+5. Trocar cada uma pela frase da transcrição mais parecida não se sustentou na
+calibração: as frases certas ficaram entre 0,12 e 0,28 de palavras em comum, e
+evidências da reunião longa, que não têm nada a ver com esta, chegaram a 0,30.
+Nenhum limiar separa as duas, e "48 horas úteis" casou com a frase errada. A causa
+é a consolidação ver só os resumos.
