@@ -24,6 +24,14 @@ _MAX_HISTORY = 6
 _MAX_TURN_CHARS = 1000
 
 
+@router.get("/executive")
+def dashboard_executive(
+    _user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return analysis_read.executive_overview(db)
+
+
 @router.get("/overview")
 def dashboard_overview(
     uf: str | None = Query(None, description="Filtra por UF (estado), ex: SP, RJ."),
@@ -39,6 +47,26 @@ def dashboard_overview(
     return analysis_read.overview(
         db, uf=uf, segmento=segmento, unidade=unidade, formato=formato,
         cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+    )
+
+
+@router.get("/meetings/top")
+def dashboard_top_risk_opportunity(
+    limit: int = Query(5, ge=1, le=20, description="Quantidade de itens por ranking (default 5)."),
+    uf: str | None = Query(None, description="Filtra por UF (estado), ex: SP, RJ."),
+    segmento: str | None = Query(None, description="Filtra por NOME_SEGMENTO (contém, case-insensitive)."),
+    unidade: str | None = Query(None, description="Filtra por NOME_UNIDADE (contém, case-insensitive)."),
+    formato: str | None = Query(None, description="Filtra por FORMATO_MEETING, ex: Vídeo, Presencial."),
+    cnae: str | None = Query(None, description="Filtra por CNAE (exato)."),
+    dt_meeting_from: str | None = Query(None, description="Data da reunião a partir de (YYYY-MM-DD)."),
+    dt_meeting_to: str | None = Query(None, description="Data da reunião até (YYYY-MM-DD)."),
+    _user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return analysis_read.top_risk_and_opportunity(
+        db, limit, uf=uf, segmento=segmento, unidade=unidade,
+        formato=formato, cnae=cnae, dt_meeting_from=dt_meeting_from,
+        dt_meeting_to=dt_meeting_to,
     )
 
 
