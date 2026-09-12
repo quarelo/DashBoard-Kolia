@@ -1,70 +1,66 @@
+import { useState } from "react";
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell,
+  ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  BarChart, Legend,
 } from "recharts";
-import { FileText, AlertTriangle, TrendingUp, Activity, ArrowRight, Package } from "lucide-react";
+import { FileText, Clock, Package, AlertTriangle, TrendingUp, Filter, ChevronDown, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { KpiCard } from "../components/ui/KpiCard";
 import { Card, CardContent, CardHeader, CardTitle, CardSubtitle } from "../components/ui/Card";
-import { dashboardService, sentimentLabels } from "../services/dashboardService";
+import { ScoreBar } from "../components/ui/ScoreBar";
+import {
+  dashboardService, formatDuration, formatMonthLabel, themeLabel,
+} from "../services/dashboardService";
 import { useAsync } from "../lib/useAsync";
 import { PageError, PageLoader } from "../components/ui/PageState";
-import type { AnalysisListItem, SentimentClass } from "../types";
+import type {
+  ExecutiveDashboard, MonthlyComparison, ProductBreakdown, RankedMeeting,
+  SegmentRiskOpportunity, ThemeRanking, UfRisk,
+} from "../types";
 
-const BRAND = "#E76B38";
+const RISK_COLOR = "#ef4444";
+const OPPORTUNITY_COLOR = "#22c55e";
+const NEUTRAL_COLOR = "#8b5cf6";
 
-const SENTIMENT_COLOR: Record<string, string> = {
-  positivo: "#22c55e",
-  neutro: "#9CA3AF",
-  negativo: "#ef4444",
-  misto: "#f59e0b",
-  "não identificado": "#D1D5DB",
-};
-
-const RISK_BUCKET = [
-  { key: "alto", label: "Alto", fill: "#ef4444" },
-  { key: "medio", label: "Médio", fill: "#f59e0b" },
-  { key: "baixo", label: "Baixo / sem sinal", fill: "#22c55e" },
-] as const;
-
-function SentimentDot({ sentiment }: { sentiment: SentimentClass }) {
-  return (
-    <span
-      className="inline-block w-2 h-2 rounded-full flex-shrink-0"
-      style={{ background: SENTIMENT_COLOR[sentiment] ?? "#D1D5DB" }}
-    />
-  );
-}
+// Altura FIXA (não max-h) para as listas de ranking: cards lado a lado com
+// contagens diferentes (2 UFs vs 6 segmentos, por exemplo) ficavam com
+// alturas desiguais porque max-h só limita o crescimento, não garante um
+// piso — uma lista curta simplesmente ficava mais baixa que a longa. Com
+// altura fixa os dois cards do par sempre batem, e quem tem mais itens rola
+// por dentro em vez de esticar o card.
+const RANKING_LIST_HEIGHT = "h-[320px] overflow-y-auto pr-1";
 
 export function Dashboard() {
-  const navigate = useNavigate();
-  const { data, loading, error, reload } = useAsync(() => dashboardService.overview(), []);
+  const { data, loading, error, reload } = useAsync(() => dashboardService.executive(), []);
 
-  if (loading) return <PageLoader label="Carregando análises..." />;
+  // Filtro só do Top 5 (risco/oportunidade): não mexe no resto da dashboard.
+  // Vazio = sem filtro, usa o top5 que já veio no payload geral (sem chamada
+  // extra); só busca de novo quando o gestor escolhe uma UF/segmento.
+  const [top5Uf, setTop5Uf] = useState("");
+  const [top5Segmento, setTop5Segmento] = useState("");
+  const hasTop5Filter = Boolean(top5Uf || top5Segmento);
+  const {
+    data: filteredTop5, loading: top5Loading, error: top5Error, reload: reloadTop5,
+  } = useAsync(
+    () => hasTop5Filter
+      ? dashboardService.executive({ uf: top5Uf || undefined, segmento: top5Segmento || undefined })
+      : Promise.resolve(null),
+    [top5Uf, top5Segmento],
+  );
+
+  if (loading) return <PageLoader label="Carregando indicadores..." />;
   if (error || !data) return <PageError message={error ?? "Sem dados."} onRetry={reload} />;
 
-  const riskData = RISK_BUCKET
-    .map((b) => ({ name: b.label, value: data.riskBuckets[b.key], fill: b.fill }))
-    .filter((d) => d.value > 0);
-
-  const sentimentData = Object.entries(data.sentiment)
-    .filter(([, v]) => v > 0)
-    .map(([k, v]) => ({ name: sentimentLabels[k as SentimentClass] ?? k, value: v, fill: SENTIMENT_COLOR[k] ?? "#D1D5DB" }));
-
-  const productData = data.topProducts.slice(0, 6).map((p) => ({
-    product: p.name.length > 22 ? p.name.slice(0, 21) + "…" : p.name,
-    mentions: p.count,
-  }));
-
-  const opportunities = data.recent.filter((r) => r.opportunityScore > 0).length;
+  const top5Risco = hasTop5Filter && filteredTop5 ? filteredTop5.top5Risco : data.top5Risco;
+  const top5Oportunidade = hasTop5Filter && filteredTop5 ? filteredTop5.top5Oportunidade : data.top5Oportunidade;
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
-          <h1 className="text-2xl font-extrabold text-ink">Dashboard Executivo</h1>
+          <h1 className="text-2xl font-extrabold text-ink">Dashboard Executiva</h1>
           <p className="text-sm text-ink-secondary mt-0.5">
-            Transcrições analisadas pela IA · {data.total} {data.total === 1 ? "reunião" : "reuniões"}
+            Visão gerencial das reuniões analisadas pela IA
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs text-ink-secondary">
@@ -73,143 +69,484 @@ export function Dashboard() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard label="Reuniões Analisadas" value={data.analyzed} icon={<FileText size={16} />} accent="brand" />
-        <KpiCard label="Reuniões em Risco Alto" value={data.highRiskCount} icon={<AlertTriangle size={16} />} accent="rose" />
-        <KpiCard label="Com Oportunidade" value={opportunities} icon={<TrendingUp size={16} />} accent="emerald" />
-        <KpiCard label="Risco Médio" value={data.avgRisk} icon={<Activity size={16} />} accent="violet" />
+      <KpiRow data={data} />
+      <MonthlyComparisonSection items={data.comparativoMensal} />
+      <ProductSection items={data.topProdutos} />
+      <ThemesSection items={data.temas} />
+
+      <div className="grid lg:grid-cols-2 gap-4 items-start">
+        <UfRiskSection items={data.topUfRisco} />
+        <SegmentSection items={data.topSegmentos} />
       </div>
 
-      <div className="grid lg:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader>
-            <CardTitle>Distribuição de Risco de Churn</CardTitle>
-            <CardSubtitle>Por faixa de score</CardSubtitle>
-          </CardHeader>
-          <CardContent>
-            {riskData.length === 0 ? (
-              <EmptyChart />
-            ) : (
-              <div className="flex items-center gap-3">
-                <ResponsiveContainer width="55%" height={170}>
-                  <PieChart>
-                    <Pie data={riskData} innerRadius={44} outerRadius={72} paddingAngle={3} dataKey="value">
-                      {riskData.map((e, i) => <Cell key={i} fill={e.fill} />)}
-                    </Pie>
-                    <Tooltip formatter={(v) => [`${v} reuniões`, ""]} />
-                  </PieChart>
-                </ResponsiveContainer>
-                <div className="space-y-2.5 flex-1">
-                  {riskData.map((item) => (
-                    <div key={item.name} className="flex items-center gap-2">
-                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: item.fill }} />
-                      <span className="text-xs text-ink-secondary flex-1">{item.name}</span>
-                      <span className="text-xs font-bold text-ink tabular-nums">{item.value}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+      <Top5FilterBar
+        uf={top5Uf} segmento={top5Segmento}
+        ufOptions={data.topUfRisco.map((u) => u.uf)}
+        segmentoOptions={data.topSegmentos.map((s) => s.segmento)}
+        onUfChange={setTop5Uf} onSegmentoChange={setTop5Segmento}
+      />
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Sentimento das Reuniões</CardTitle>
-            <CardSubtitle>Classificação da IA</CardSubtitle>
-          </CardHeader>
-          <CardContent>
-            {sentimentData.length === 0 ? (
-              <EmptyChart />
-            ) : (
-              <ResponsiveContainer width="100%" height={180}>
-                <BarChart data={sentimentData} margin={{ top: 0, right: 0, left: -18, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" vertical={false} />
-                  <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
-                  <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
-                  <Tooltip formatter={(v) => [`${v} reuniões`, ""]} />
-                  <Bar dataKey="value" radius={[4, 4, 0, 0]}>
-                    {sentimentData.map((e, i) => <Cell key={i} fill={e.fill} />)}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      <div className="grid lg:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader className="flex items-center gap-2">
-            <Package size={15} className="text-brand" />
-            <div>
-              <CardTitle>Produtos Mais Citados</CardTitle>
-              <CardSubtitle>Contagem de reuniões que mencionam</CardSubtitle>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {productData.length === 0 ? (
-              <EmptyChart />
-            ) : (
-              <ResponsiveContainer width="100%" height={Math.max(160, productData.length * 34)}>
-                <BarChart data={productData} layout="vertical" margin={{ top: 0, right: 12, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" horizontal={false} />
-                  <XAxis type="number" allowDecimals={false} tick={{ fontSize: 10, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
-                  <YAxis type="category" dataKey="product" width={140} tick={{ fontSize: 10, fill: "#6B7280" }} axisLine={false} tickLine={false} />
-                  <Tooltip formatter={(v) => [`${v} reuniões`, ""]} />
-                  <Bar dataKey="mentions" fill={BRAND} radius={[0, 4, 4, 0]} barSize={16} />
-                </BarChart>
-              </ResponsiveContainer>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex items-center justify-between">
-            <div>
-              <CardTitle>Reuniões Recentes</CardTitle>
-              <CardSubtitle>Últimas transcrições processadas</CardSubtitle>
-            </div>
-            <button onClick={() => navigate("/app/meetings")}
-              className="flex items-center gap-1 text-xs text-brand hover:text-brand-600 font-semibold transition-colors">
-              Ver todas <ArrowRight size={12} />
-            </button>
-          </CardHeader>
-          <CardContent className="pt-0 space-y-1">
-            {data.recent.length === 0 ? (
-              <p className="text-sm text-ink-muted py-6 text-center">Nenhuma análise ainda.</p>
-            ) : data.recent.map((m: AnalysisListItem) => (
-              <div
-                key={m.analysisId}
-                onClick={() => navigate(`/app/meetings/${m.analysisId}`)}
-                className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-surface cursor-pointer transition-colors group"
-              >
-                <SentimentDot sentiment={m.sentiment} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-ink group-hover:text-brand truncate transition-colors">
-                    {m.title}
-                  </p>
-                  <p className="text-xs text-ink-secondary truncate">
-                    {m.products.slice(0, 2).join(" · ") || `${m.totalChunks} trechos analisados`}
-                  </p>
-                </div>
-                <div className="flex items-center gap-3 text-xs flex-shrink-0">
-                  <span className="text-rose-500 font-semibold tabular-nums" title="Risco de churn">R {m.riskScore}</span>
-                  <span className="text-blue-500 font-semibold tabular-nums" title="Oportunidade">O {m.opportunityScore}</span>
-                </div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
+      <div className="grid lg:grid-cols-2 gap-4 items-start">
+        <RankedMeetingsSection
+          title="Top 5 — Reuniões em Risco de Churn"
+          subtitle="Maior score de risco primeiro"
+          icon={<AlertTriangle size={15} className="text-rose-500" />}
+          items={top5Risco}
+          loading={hasTop5Filter && top5Loading}
+          error={hasTop5Filter ? top5Error : null}
+          onRetry={reloadTop5}
+          colorMode="risk"
+          emptyLabel={hasTop5Filter
+            ? "Nenhuma reunião com risco de churn para esse filtro."
+            : "Nenhuma reunião com risco de churn identificado no período."}
+        />
+        <RankedMeetingsSection
+          title="Top 5 — Reuniões com Mais Oportunidade"
+          subtitle="Maior score de oportunidade primeiro"
+          icon={<TrendingUp size={15} className="text-emerald-500" />}
+          items={top5Oportunidade}
+          loading={hasTop5Filter && top5Loading}
+          error={hasTop5Filter ? top5Error : null}
+          onRetry={reloadTop5}
+          colorMode="opportunity"
+          emptyLabel={hasTop5Filter
+            ? "Nenhuma oportunidade para esse filtro."
+            : "Nenhuma oportunidade comercial identificada no período."}
+        />
       </div>
     </div>
   );
 }
 
-function EmptyChart() {
+/* ── 1. KPIs ───────────────────────────────────────────────────────────── */
+
+function KpiRow({ data }: { data: ExecutiveDashboard }) {
+  const { kpis } = data;
   return (
-    <div className="h-[170px] flex items-center justify-center text-xs text-ink-muted">
-      Sem dados suficientes para este gráfico.
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <KpiCard
+        label="Reuniões no período"
+        value={kpis.totalReunioes}
+        icon={<FileText size={16} />}
+        accent="brand"
+      />
+      <KpiCard
+        label="Duração média"
+        value={kpis.duracaoMediaMinutos != null ? formatDuration(kpis.duracaoMediaMinutos) : "—"}
+        icon={<Clock size={16} />}
+        accent="violet"
+      />
+      <KpiCard
+        label="Produto mais citado"
+        value={kpis.produtoMaisCitado ?? "—"}
+        caption={
+          kpis.produtoMaisCitado && kpis.mencoesProdutoMaisCitado != null
+            ? `${kpis.mencoesProdutoMaisCitado} menç${kpis.mencoesProdutoMaisCitado === 1 ? "ão" : "ões"}`
+            : undefined
+        }
+        icon={<Package size={16} />}
+        accent="blue"
+      />
+    </div>
+  );
+}
+
+/* ── 2. Comparativo mensal ─────────────────────────────────────────────── */
+
+function MonthlyComparisonSection({ items }: { items: MonthlyComparison[] }) {
+  const chartData = items.map((m) => ({ ...m, label: formatMonthLabel(m.mes) }));
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Comparativo Mensal</CardTitle>
+        <CardSubtitle>Reuniões, risco médio e oportunidade média ao longo do tempo</CardSubtitle>
+      </CardHeader>
+      <CardContent>
+        {chartData.length === 0 ? (
+          <EmptyChart label="Sem histórico mensal suficiente para este gráfico." />
+        ) : (
+          <ResponsiveContainer width="100%" height={260}>
+            <ComposedChart data={chartData} margin={{ top: 4, right: 8, left: -12, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
+              <YAxis yAxisId="reunioes" allowDecimals={false} tick={{ fontSize: 10, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
+              <YAxis yAxisId="score" orientation="right" domain={[0, 100]} tick={{ fontSize: 10, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
+              <Tooltip />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar yAxisId="reunioes" dataKey="reunioes" name="Reuniões" fill={NEUTRAL_COLOR} radius={[4, 4, 0, 0]} barSize={28} fillOpacity={0.25} />
+              <Line yAxisId="score" type="monotone" dataKey="riscoMedio" name="Risco médio" stroke={RISK_COLOR} strokeWidth={2} dot={{ r: 3 }} />
+              <Line yAxisId="score" type="monotone" dataKey="oportunidadeMedia" name="Oportunidade média" stroke={OPPORTUNITY_COLOR} strokeWidth={2} dot={{ r: 3 }} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/* ── 3. Gráfico de produto ─────────────────────────────────────────────── */
+const PRODUCT_LIST_HEIGHT = "max-h-[288px] overflow-y-auto pr-1";
+
+function ProductSection({ items }: { items: ProductBreakdown[] }) {
+  const hasBreakdown = items.some((p) => p.reclamacoes != null || p.gaps != null || p.elogios != null);
+  const maxMentions = Math.max(1, ...items.map((p) => p.mencoes));
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>O Gráfico de Produto</CardTitle>
+        <CardSubtitle>Reclamações, gaps e elogios por produto citado nas reuniões</CardSubtitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {items.length === 0 ? (
+          <EmptyChart label="Nenhum produto citado no período." />
+        ) : (
+          <>
+            <div className={`space-y-3 ${PRODUCT_LIST_HEIGHT}`}>
+              {items.map((product) => (
+                <ProductBar key={product.nome} product={product} maxMentions={maxMentions} />
+              ))}
+            </div>
+            {hasBreakdown && (
+              <div className="flex items-center gap-4 pt-2 text-xs text-ink-secondary">
+                <LegendDot color="bg-rose-500" label="Reclamações" />
+                <LegendDot color="bg-amber-400" label="Gaps" />
+                <LegendDot color="bg-emerald-500" label="Elogios" />
+                <LegendDot color="bg-gray-300" label="Sem detalhamento" />
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ProductBar({ product, maxMentions }: { product: ProductBreakdown; maxMentions: number }) {
+  const { nome, mencoes, reclamacoes, gaps, elogios } = product;
+  const hasDetail = reclamacoes != null || gaps != null || elogios != null;
+  const total = (reclamacoes ?? 0) + (gaps ?? 0) + (elogios ?? 0);
+  // Largura da barra escala pelas menções, para comparar volume entre produtos.
+  const widthPct = Math.max(6, (mencoes / maxMentions) * 100);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs mb-1">
+        <span className="font-semibold text-ink truncate pr-2" title={nome}>{nome}</span>
+        <span className="text-ink-muted flex-shrink-0 tabular-nums">{mencoes} menç{mencoes === 1 ? "ão" : "ões"}</span>
+      </div>
+      <div className="h-3.5 rounded-full bg-surface overflow-hidden flex" style={{ width: `${widthPct}%` }}>
+        {hasDetail && total > 0 ? (
+          <>
+            {(reclamacoes ?? 0) > 0 && (
+              <div
+                className="h-full bg-rose-500 flex items-center justify-center text-white text-[9px] font-bold leading-none overflow-visible"
+                style={{ width: `${((reclamacoes ?? 0) / total) * 100}%` }}
+                title={`${reclamacoes} reclamações`}
+              >
+                {reclamacoes}
+              </div>
+            )}
+            {(gaps ?? 0) > 0 && (
+              <div
+                className="h-full bg-amber-400 flex items-center justify-center text-white text-[9px] font-bold leading-none overflow-visible"
+                style={{ width: `${((gaps ?? 0) / total) * 100}%` }}
+                title={`${gaps} gaps`}
+              >
+                {gaps}
+              </div>
+            )}
+            {(elogios ?? 0) > 0 && (
+              <div
+                className="h-full bg-emerald-500 flex items-center justify-center text-white text-[9px] font-bold leading-none overflow-visible"
+                style={{ width: `${((elogios ?? 0) / total) * 100}%` }}
+                title={`${elogios} elogios`}
+              >
+                {elogios}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="h-full bg-gray-300 w-full" title="Sem detalhamento por reclamação/gap/elogio para este produto" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className={`w-2 h-2 rounded-full ${color}`} />
+      {label}
+    </span>
+  );
+}
+
+/* ── 4. Temas e objeções ───────────────────────────────────────────────── */
+
+function ThemesSection({ items }: { items: ThemeRanking[] }) {
+  const chartData = items.map((t) => ({ ...t, label: themeLabel(t.tema) }));
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Temas e Objeções Detectados pela IA</CardTitle>
+        <CardSubtitle>Categorias de evidência mais frequentes nas transcrições</CardSubtitle>
+      </CardHeader>
+      <CardContent>
+        {chartData.length === 0 ? (
+          <EmptyChart label="Sem evidências categorizadas suficientes." />
+        ) : (
+          <ResponsiveContainer width="100%" height={Math.max(160, chartData.length * 32)}>
+            <BarChart data={chartData} layout="vertical" margin={{ top: 0, right: 24, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" horizontal={false} />
+              <XAxis type="number" allowDecimals={false} tick={{ fontSize: 10, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
+              <YAxis type="category" dataKey="label" width={150} tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false} />
+              <Tooltip formatter={(v) => [`${v} ocorrências`, ""]} />
+              <Bar dataKey="ocorrencias" fill={NEUTRAL_COLOR} radius={[0, 4, 4, 0]} barSize={16} />
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/* ── 5. Risco de churn por UF ──────────────────────────────────────────── */
+
+function UfRiskSection({ items }: { items: UfRisk[] }) {
+  const leader = items[0];
+  const insight = leader && leader.riscoMedio > 0
+    ? `${leader.uf} concentra o maior risco médio (${leader.riscoMedio}) entre ${leader.reunioes} ${leader.reunioes === 1 ? "reunião monitorada" : "reuniões monitoradas"}.`
+    : null;
+  const maxRisco = Math.max(1, ...items.map((u) => u.riscoMedio));
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Risco de Churn por UF</CardTitle>
+        <CardSubtitle>Estados ordenados pelo maior risco médio</CardSubtitle>
+      </CardHeader>
+      <CardContent>
+        {items.length === 0 ? (
+          <EmptyChart label="Sem reuniões com UF identificada no período." />
+        ) : (
+          <div className={`flex flex-col justify-between gap-2.5 ${RANKING_LIST_HEIGHT}`}>
+            {items.map((item) => (
+              <div key={item.uf} className="flex items-center gap-3 flex-shrink-0">
+                <span className="text-xs font-bold text-ink w-8 flex-shrink-0">{item.uf}</span>
+                <div className="flex-1 h-3 rounded-full bg-surface overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-rose-500"
+                    style={{ width: `${(item.riscoMedio / maxRisco) * 100}%` }}
+                  />
+                </div>
+                <span className="text-xs font-bold text-ink tabular-nums w-9 text-right">{item.riscoMedio}</span>
+                <span className="text-xs text-ink-muted tabular-nums w-16 text-right flex-shrink-0">
+                  {item.reunioes} {item.reunioes === 1 ? "reunião" : "reuniões"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        {insight && <p className="text-xs text-ink-secondary pt-2 mt-2 border-t border-surface-border">{insight}</p>}
+      </CardContent>
+    </Card>
+  );
+}
+
+/* ── 6. Risco x oportunidade por segmento ──────────────────────────────── */
+
+function SegmentSection({ items }: { items: SegmentRiskOpportunity[] }) {
+  // Borboleta: risco e oportunidade divergem de uma coluna central de rótulos,
+  // na mesma escala dos dois lados — assim o comprimento das barras é
+  // comparável tanto entre segmentos quanto entre risco e oportunidade.
+  const maxScore = Math.max(1, ...items.flatMap((s) => [s.riscoMedio, s.oportunidadeMedia]));
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Risco x Oportunidade por Segmento</CardTitle>
+        <CardSubtitle>Score médio de risco (esquerda) e de oportunidade (direita) por segmento</CardSubtitle>
+      </CardHeader>
+      <CardContent>
+        {items.length === 0 ? (
+          <EmptyChart label="Sem reuniões com segmento identificado no período." />
+        ) : (
+          <>
+            <div
+              className={`grid items-center gap-y-3 gap-x-2 ${RANKING_LIST_HEIGHT}`}
+              style={{ gridTemplateColumns: "1fr auto 1fr" }}
+            >
+              {items.map((item) => (
+                <FragmentRow key={item.segmento} item={item} maxScore={maxScore} />
+              ))}
+            </div>
+            <div className="flex items-center gap-4 pt-2 mt-1 text-xs text-ink-secondary">
+              <LegendDot color="bg-rose-500" label="Risco médio" />
+              <LegendDot color="bg-emerald-500" label="Oportunidade média" />
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function FragmentRow({ item, maxScore }: { item: SegmentRiskOpportunity; maxScore: number }) {
+  return (
+    <>
+      <div className="flex items-center justify-end gap-1.5">
+        <span className="text-[10px] font-bold text-rose-600 tabular-nums flex-shrink-0">{item.riscoMedio}</span>
+        <div className="h-4 flex justify-end" style={{ width: `${(item.riscoMedio / maxScore) * 100}%`, minWidth: item.riscoMedio > 0 ? 4 : 0 }}>
+          <div className="h-full w-full rounded-l-md bg-rose-500" title={`Risco médio: ${item.riscoMedio}`} />
+        </div>
+      </div>
+
+      <div className="flex flex-col items-center text-center px-1 min-w-[84px] max-w-[130px]">
+        <span className="text-xs font-semibold text-ink truncate w-full" title={item.segmento}>{item.segmento}</span>
+        <span className="text-[10px] text-ink-muted tabular-nums">
+          {item.reunioes} {item.reunioes === 1 ? "reunião" : "reuniões"}
+        </span>
+      </div>
+
+      <div className="flex items-center gap-1.5">
+        <div className="h-4" style={{ width: `${(item.oportunidadeMedia / maxScore) * 100}%`, minWidth: item.oportunidadeMedia > 0 ? 4 : 0 }}>
+          <div className="h-full w-full rounded-r-md bg-emerald-500" title={`Oportunidade média: ${item.oportunidadeMedia}`} />
+        </div>
+        <span className="text-[10px] font-bold text-emerald-600 tabular-nums flex-shrink-0">{item.oportunidadeMedia}</span>
+      </div>
+    </>
+  );
+}
+
+/* ── Filtro do Top 5 (UF + segmento) ──────────────────────────────────── */
+
+function Top5FilterBar({
+  uf, segmento, ufOptions, segmentoOptions, onUfChange, onSegmentoChange,
+}: {
+  uf: string;
+  segmento: string;
+  ufOptions: string[];
+  segmentoOptions: string[];
+  onUfChange: (value: string) => void;
+  onSegmentoChange: (value: string) => void;
+}) {
+  if (ufOptions.length === 0 && segmentoOptions.length === 0) return null;
+  const hasFilter = Boolean(uf || segmento);
+  return (
+    <div className="flex flex-wrap items-center gap-2.5 -mb-1">
+      <span className="text-xs font-semibold text-ink-secondary flex items-center gap-1.5 flex-shrink-0">
+        <Filter size={13} /> Filtrar Top 5 por:
+      </span>
+      {ufOptions.length > 0 && (
+        <FilterSelect label="Todas as UFs" value={uf} onChange={onUfChange} options={ufOptions} />
+      )}
+      {segmentoOptions.length > 0 && (
+        <FilterSelect label="Todos os segmentos" value={segmento} onChange={onSegmentoChange} options={segmentoOptions} />
+      )}
+      {hasFilter && (
+        <button
+          onClick={() => { onUfChange(""); onSegmentoChange(""); }}
+          className="flex items-center gap-1 text-xs text-ink-muted hover:text-ink transition-colors flex-shrink-0"
+        >
+          <X size={12} /> Limpar
+        </button>
+      )}
+    </div>
+  );
+}
+
+function FilterSelect({ label, value, onChange, options }: {
+  label: string; value: string; onChange: (value: string) => void; options: string[];
+}) {
+  return (
+    <div className="relative">
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="appearance-none pl-3 pr-7 py-1.5 text-xs bg-white border border-surface-border rounded-lg focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand/30 cursor-pointer text-ink"
+      >
+        <option value="">{label}</option>
+        {options.map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+      <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-muted pointer-events-none" />
+    </div>
+  );
+}
+
+/* ── 7 & 8. Top 5 reuniões ─────────────────────────────────────────────── */
+
+function RankedMeetingsSection({
+  title, subtitle, icon, items, colorMode, emptyLabel, loading, error, onRetry,
+}: {
+  title: string;
+  subtitle: string;
+  icon: React.ReactNode;
+  items: RankedMeeting[];
+  colorMode: "risk" | "opportunity";
+  emptyLabel: string;
+  /** Carregando o Top 5 filtrado por UF/segmento (chamada extra, só quando há filtro). */
+  loading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
+}) {
+  const navigate = useNavigate();
+  return (
+    <Card>
+      <CardHeader className="flex items-center gap-2">
+        {icon}
+        <div>
+          <CardTitle>{title}</CardTitle>
+          <CardSubtitle>{subtitle}</CardSubtitle>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <div className={`flex items-center justify-center text-xs text-ink-muted ${RANKING_LIST_HEIGHT}`}>Aplicando filtro...</div>
+        ) : error ? (
+          <div className={`flex flex-col items-center justify-center gap-2 text-center ${RANKING_LIST_HEIGHT}`}>
+            <p className="text-xs text-ink-secondary">{error}</p>
+            {onRetry && <button onClick={onRetry} className="text-brand text-xs font-semibold hover:underline">Tentar novamente</button>}
+          </div>
+        ) : items.length === 0 ? (
+          <p className={`text-sm text-ink-muted text-center flex items-center justify-center ${RANKING_LIST_HEIGHT}`}>{emptyLabel}</p>
+        ) : <div className={`space-y-1 ${RANKING_LIST_HEIGHT}`}>{items.map((item) => (
+          <div
+            key={item.analysisId}
+            onClick={() => navigate(`/app/meetings/${item.analysisId}`)}
+            className="px-3 py-2.5 rounded-lg hover:bg-surface cursor-pointer transition-colors"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-ink truncate">
+                Reunião {item.externalMeetingId}
+                {(item.uf || item.segmento) && (
+                  <span className="text-ink-secondary font-normal">
+                    {" "}({[item.uf, item.segmento].filter(Boolean).join(" · ")})
+                  </span>
+                )}
+              </p>
+              <span className="text-sm font-extrabold text-ink tabular-nums flex-shrink-0">{item.score}</span>
+            </div>
+            <ScoreBar score={item.score} showLabel={false} size="xs" colorMode={colorMode} />
+            {item.motivo && (
+              <p className="text-xs text-ink-secondary mt-1 line-clamp-2">
+                <span className="font-semibold">Motivo:</span> {item.motivo}
+              </p>
+            )}
+          </div>
+        ))}</div>}
+      </CardContent>
+    </Card>
+  );
+}
+
+/* ── shared ────────────────────────────────────────────────────────────── */
+
+function EmptyChart({ label }: { label: string }) {
+  return (
+    <div className="h-[120px] flex items-center justify-center text-xs text-ink-muted text-center px-4">
+      {label}
     </div>
   );
 }

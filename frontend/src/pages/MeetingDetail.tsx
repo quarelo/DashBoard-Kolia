@@ -113,7 +113,7 @@ export function MeetingDetail() {
   const metadata = Object.entries(data.metadata).filter(([, v]) => v && v !== "");
 
   return (
-    <div className="space-y-5 max-w-5xl">
+    <div className="space-y-5">
       <div className="flex items-center gap-2 text-sm text-gray-500">
         <button onClick={() => navigate("/app/meetings")} className="flex items-center gap-1.5 hover:text-brand transition-colors">
           <ArrowLeft size={15} />
@@ -137,9 +137,7 @@ export function MeetingDetail() {
           <div className="flex-1 min-w-0">
             <h1 className="text-2xl font-bold text-gray-900 leading-tight mb-1">{data.title}</h1>
             <p className="text-sm text-gray-500 flex items-center gap-2">
-              <Layers size={13} /> {data.totalChunks} trechos · {data.totalTokens.toLocaleString("pt-BR")} tokens
-              <span className="text-gray-300">·</span>
-              {statusLabel(data.status)}
+              <Layers size={13} /> {statusLabel(data.status)}
             </p>
           </div>
           <div className={cn("flex items-center gap-2 px-3 py-2 rounded-xl border text-sm font-semibold flex-shrink-0", sentimentTone[data.sentiment])}>

@@ -106,6 +106,78 @@ export interface DashboardOverview {
   recent: AnalysisListItem[];
 }
 
+/* ── Dashboard Executiva (GET /api/dashboard/executive) ──────────────── */
+
+export interface ExecutiveKpis {
+  totalReunioes: number;
+  /** null quando nenhuma reunião do período tem DURACAO_MEETING numérico. */
+  duracaoMediaMinutos: number | null;
+  produtoMaisCitado: string | null;
+  mencoesProdutoMaisCitado: number | null;
+}
+
+export interface MonthlyComparison {
+  /** "YYYY-MM" — meses variam conforme os dados; nunca fixo. */
+  mes: string;
+  reunioes: number;
+  riscoMedio: number;
+  oportunidadeMedia: number;
+}
+
+/**
+ * reclamacoes/gaps/elogios só existem quando a reunião cita exatamente um
+ * produto (ver nota em `analysis_read.executive_overview`, backend) — em
+ * reuniões com vários produtos citados não há como saber a qual eles se
+ * referem, então os três campos vêm ausentes (não zerados).
+ */
+export interface ProductBreakdown {
+  nome: string;
+  mencoes: number;
+  reclamacoes?: number;
+  gaps?: number;
+  elogios?: number;
+}
+
+export interface ThemeRanking {
+  tema: string;
+  ocorrencias: number;
+}
+
+export interface UfRisk {
+  uf: string;
+  riscoMedio: number;
+  reunioes: number;
+}
+
+export interface SegmentRiskOpportunity {
+  segmento: string;
+  reunioes: number;
+  riscoMedio: number;
+  oportunidadeMedia: number;
+}
+
+export interface RankedMeeting {
+  analysisId: string;
+  externalMeetingId: string;
+  /** Título da reunião — não há coluna de razão social/cliente na fonte. */
+  titulo: string;
+  uf: string | null;
+  segmento: string | null;
+  score: number;
+  motivo: string;
+}
+
+export interface ExecutiveDashboard {
+  kpis: ExecutiveKpis;
+  comparativoMensal: MonthlyComparison[];
+  topProdutos: ProductBreakdown[];
+  temas: ThemeRanking[];
+  topUfRisco: UfRisk[];
+  topSegmentos: SegmentRiskOpportunity[];
+  top5Risco: RankedMeeting[];
+  top5Oportunidade: RankedMeeting[];
+}
+
 /* ── Insights derivados (a IA não tem entidade própria de insight) ───── */
 
 export type Priority = "critical" | "high" | "medium" | "low";
