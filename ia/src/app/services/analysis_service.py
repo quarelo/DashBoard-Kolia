@@ -20,6 +20,7 @@ from src.app.services.chunk_service import (
     sanitize_transcription,
 )
 from src.app.services.llm_service import (
+    clean_open_questions,
     consolidate_summaries,
     complete_missing_fields,
     generate_chunk_summary,
@@ -688,7 +689,8 @@ def build_compact_final_summary(
         "feedback_produto": _select_critical_facts(grouped["FEEDBACK"], 3),
         "evidencias": evidence,
         "recomendacao_acao": _select_critical_facts(grouped["AÇÃO"], 3),
-        "duvidas_em_aberto": _select_critical_facts(grouped["DÚVIDA"], 3),
+        "duvidas_em_aberto": _select_critical_facts(
+            clean_open_questions(grouped["DÚVIDA"]), 3),
     }
 
 
@@ -924,10 +926,10 @@ def process_analysis_summaries(
                 [chunk.clean_content or chunk.content for chunk in chunks],
             )
             logger.info("analysis_id=%s deterministic_consolidation=true", analysis.id)
-        elif len(summaries) == 1:
-            analysis.final_summary = build_single_chunk_final_summary(summaries[0])
-            logger.info("analysis_id=%s single_chunk_consolidation=skipped", analysis.id)
         else:
+            # One-chunk meetings too. Skipping consolidation left the regex's pick of
+            # "?" sentences as the open questions; reasoned open points need the
+            # model, and the extra consolidation call was accepted for that.
             started_at = perf_counter()
             analysis.final_summary = consolidate_summaries(
                 summaries, metadata_context=metadata_context,
