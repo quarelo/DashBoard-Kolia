@@ -185,6 +185,7 @@ function MonthlyComparisonSection({ items }: { items: MonthlyComparison[] }) {
 }
 
 /* ── 3. Gráfico de produto ─────────────────────────────────────────────── */
+const PRODUCT_LIST_HEIGHT = "max-h-[288px] overflow-y-auto pr-1";
 
 function ProductSection({ items }: { items: ProductBreakdown[] }) {
   const hasBreakdown = items.some((p) => p.reclamacoes != null || p.gaps != null || p.elogios != null);
@@ -201,9 +202,11 @@ function ProductSection({ items }: { items: ProductBreakdown[] }) {
           <EmptyChart label="Nenhum produto citado no período." />
         ) : (
           <>
-            {items.map((product) => (
-              <ProductBar key={product.nome} product={product} maxMentions={maxMentions} />
-            ))}
+            <div className={`space-y-3 ${PRODUCT_LIST_HEIGHT}`}>
+              {items.map((product) => (
+                <ProductBar key={product.nome} product={product} maxMentions={maxMentions} />
+              ))}
+            </div>
             {hasBreakdown && (
               <div className="flex items-center gap-4 pt-2 text-xs text-ink-secondary">
                 <LegendDot color="bg-rose-500" label="Reclamações" />
@@ -236,13 +239,31 @@ function ProductBar({ product, maxMentions }: { product: ProductBreakdown; maxMe
         {hasDetail && total > 0 ? (
           <>
             {(reclamacoes ?? 0) > 0 && (
-              <div className="h-full bg-rose-500" style={{ width: `${((reclamacoes ?? 0) / total) * 100}%` }} title={`${reclamacoes} reclamações`} />
+              <div
+                className="h-full bg-rose-500 flex items-center justify-center text-white text-[9px] font-bold leading-none overflow-visible"
+                style={{ width: `${((reclamacoes ?? 0) / total) * 100}%` }}
+                title={`${reclamacoes} reclamações`}
+              >
+                {reclamacoes}
+              </div>
             )}
             {(gaps ?? 0) > 0 && (
-              <div className="h-full bg-amber-400" style={{ width: `${((gaps ?? 0) / total) * 100}%` }} title={`${gaps} gaps`} />
+              <div
+                className="h-full bg-amber-400 flex items-center justify-center text-white text-[9px] font-bold leading-none overflow-visible"
+                style={{ width: `${((gaps ?? 0) / total) * 100}%` }}
+                title={`${gaps} gaps`}
+              >
+                {gaps}
+              </div>
             )}
             {(elogios ?? 0) > 0 && (
-              <div className="h-full bg-emerald-500" style={{ width: `${((elogios ?? 0) / total) * 100}%` }} title={`${elogios} elogios`} />
+              <div
+                className="h-full bg-emerald-500 flex items-center justify-center text-white text-[9px] font-bold leading-none overflow-visible"
+                style={{ width: `${((elogios ?? 0) / total) * 100}%` }}
+                title={`${elogios} elogios`}
+              >
+                {elogios}
+              </div>
             )}
           </>
         ) : (
@@ -482,14 +503,14 @@ function RankedMeetingsSection({
       </CardHeader>
       <CardContent>
         {loading ? (
-          <div className="h-[120px] flex items-center justify-center text-xs text-ink-muted">Aplicando filtro...</div>
+          <div className={`flex items-center justify-center text-xs text-ink-muted ${RANKING_LIST_HEIGHT}`}>Aplicando filtro...</div>
         ) : error ? (
-          <div className="h-[120px] flex flex-col items-center justify-center gap-2 text-center">
+          <div className={`flex flex-col items-center justify-center gap-2 text-center ${RANKING_LIST_HEIGHT}`}>
             <p className="text-xs text-ink-secondary">{error}</p>
             {onRetry && <button onClick={onRetry} className="text-brand text-xs font-semibold hover:underline">Tentar novamente</button>}
           </div>
         ) : items.length === 0 ? (
-          <p className="text-sm text-ink-muted py-6 text-center">{emptyLabel}</p>
+          <p className={`text-sm text-ink-muted text-center flex items-center justify-center ${RANKING_LIST_HEIGHT}`}>{emptyLabel}</p>
         ) : <div className={`space-y-1 ${RANKING_LIST_HEIGHT}`}>{items.map((item) => (
           <div
             key={item.analysisId}
