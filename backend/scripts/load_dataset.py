@@ -239,8 +239,15 @@ def main() -> None:
         meetings = all_meetings(client)
         pending = [m for m in meetings if m.get("analysis_id") is None]
         log(f"{len(meetings)} reuniões no banco; {len(pending)} sem análise.")
+        without_analysis = len(pending)
         if args.limit:
             pending = pending[:args.limit]
+        if not pending:
+            log("Nenhuma reunião para analisar.")
+            return
+        limited = (f" (--limit {args.limit}; {without_analysis} sem análise no total)"
+                   if len(pending) < without_analysis else "")
+        log(f"Vão ser analisadas {len(pending)} reuniões{limited}.")
 
         done = failed = streak = 0
         durations: list[float] = []
