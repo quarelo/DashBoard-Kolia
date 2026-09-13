@@ -163,6 +163,33 @@ def _clean_history(raw) -> list[dict]:
     return collapsed[-_MAX_HISTORY:]
 
 
+def _require_analysis(db: Session, analysis_id: UUID) -> dict:
+    item = analysis_read.get_analysis(db, analysis_id)
+    if item is None:
+        raise HTTPException(404, "Análise não encontrada.")
+    return item
+
+
+def _ia_detail(response: httpx.Response, default: str) -> str:
+    try:
+        detail = response.json().get("detail")
+    except ValueError:
+        detail = None
+    return detail if isinstance(detail, str) and detail else default
+
+
+def _ia_get(client: httpx.Client, path: str) -> dict:
+    try:
+        response = client.get(path)
+    except httpx.HTTPError as error:
+        raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "Serviço de IA indisponível."}) from error
+    if response.status_code >= 500:
+        raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "A IA não respondeu. Tente novamente."})
+    if response.status_code == 404:
+        raise HTTPException(404, _ia_detail(response, "Não encontrado na IA."))
+    return response.json()
+
+
 @router.get("/meetings/{analysis_id}/chat")
 def dashboard_meeting_chat_history(
     analysis_id: UUID,
@@ -170,19 +197,34 @@ def dashboard_meeting_chat_history(
     db: Session = Depends(get_db),
     client: httpx.Client = Depends(get_ia_client),
 ):
-    """A conversa guardada desta reunião, para a tela reabrir de onde parou."""
-    item = analysis_read.get_analysis(db, analysis_id)
-    if item is None:
-        raise HTTPException(404, "Análise não encontrada.")
-    try:
-        response = client.get(f"/analises/{analysis_id}/chat")
-    except httpx.HTTPError as error:
-        raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "Serviço de IA indisponível."}) from error
-    if response.status_code >= 500:
-        raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "A IA não respondeu. Tente novamente."})
-    if response.status_code == 404:
-        raise HTTPException(404, "Análise não encontrada na IA.")
-    return response.json()
+    """A conversa mais recente desta reunião."""
+    _require_analysis(db, analysis_id)
+    return _ia_get(client, f"/analises/{analysis_id}/chat")
+
+
+@router.get("/meetings/{analysis_id}/chat/conversations")
+def dashboard_meeting_conversations(
+    analysis_id: UUID,
+    _user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    client: httpx.Client = Depends(get_ia_client),
+):
+    """As conversas desta reunião, a mexida por último primeiro."""
+    _require_analysis(db, analysis_id)
+    return _ia_get(client, f"/analises/{analysis_id}/conversas")
+
+
+@router.get("/meetings/{analysis_id}/chat/conversations/{conversation_id}")
+def dashboard_meeting_conversation(
+    analysis_id: UUID,
+    conversation_id: UUID,
+    _user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    client: httpx.Client = Depends(get_ia_client),
+):
+    """Uma conversa desta reunião, para a tela reabri-la."""
+    _require_analysis(db, analysis_id)
+    return _ia_get(client, f"/analises/{analysis_id}/conversas/{conversation_id}")
 
 
 @router.post("/meetings/{analysis_id}/chat")
@@ -193,9 +235,7 @@ def dashboard_meeting_chat(
     db: Session = Depends(get_db),
     client: httpx.Client = Depends(get_ia_client),
 ):
-    item = analysis_read.get_analysis(db, analysis_id)
-    if item is None:
-        raise HTTPException(404, "Análise não encontrada.")
+    item = _require_analysis(db, analysis_id)
     if item["status"] != "DONE":
         raise HTTPException(409, {
             "code": "RAG_NOT_READY",
@@ -210,6 +250,13 @@ def dashboard_meeting_chat(
     top_k = payload.get("top_k")
     if isinstance(top_k, int) and 1 <= top_k <= 6:
         body["top_k"] = top_k
+    # Sem conversa, a IA começa uma nova e devolve o id dela na resposta.
+    conversation_id = payload.get("conversation_id")
+    if conversation_id is not None:
+        try:
+            body["conversation_id"] = str(UUID(str(conversation_id)))
+        except ValueError:
+            raise HTTPException(422, "Conversa inválida.") from None
 
     try:
         # A geração do chat pode demorar (carga de modelo + inferência no host);
@@ -222,7 +269,7 @@ def dashboard_meeting_chat(
         raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "Serviço de IA indisponível."}) from error
 
     if response.status_code == 404:
-        raise HTTPException(404, "Análise não encontrada na IA.")
+        raise HTTPException(404, _ia_detail(response, "Análise não encontrada na IA."))
     if response.status_code == 409:
         raise HTTPException(409, {"code": "RAG_NOT_READY", "message": "Índice da reunião indisponível para chat."})
     if response.status_code in (401, 403):
