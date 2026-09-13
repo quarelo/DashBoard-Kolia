@@ -2,13 +2,13 @@ import json
 import logging
 import re
 import unicodedata
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from src.app.core.config import settings
-from src.app.models.analysis import ChatMessage, MeetingAnalysis
+from src.app.models.analysis import ChatConversation, ChatMessage, MeetingAnalysis
 from src.app.schemas.analysis import ChatHistoryMessage, ChatRequest
 from src.app.services.llm_service import OllamaError, generate_chat_answer
 from src.app.services.rag_service import (
@@ -699,16 +699,50 @@ def _reread_evidence(results: list[dict], question: str) -> list[dict]:
     return [item for _score, item in scored[:_REREAD_EVIDENCE_COUNT]]
 
 
-def load_conversation(db: Session, analysis_id: UUID, limit: int = 200) -> list[ChatMessage]:
-    """A conversa desta reunião, do começo, em ordem."""
+_CONVERSATION_TITLE_CHARS = 80
+
+
+def list_conversations(db: Session, analysis_id: UUID) -> list[ChatConversation]:
+    """As conversas desta reunião, a mexida por último primeiro."""
+    return list(
+        db.execute(
+            select(ChatConversation)
+            .where(ChatConversation.analysis_id == analysis_id)
+            .order_by(ChatConversation.updated_at.desc())
+        ).scalars()
+    )
+
+
+def get_conversation(db: Session, analysis_id: UUID, conversation_id: UUID) -> ChatConversation | None:
+    """A conversa pedida, só se for desta reunião: o id sozinho não autoriza ler outra."""
+    return next(iter(
+        db.execute(
+            select(ChatConversation).where(
+                ChatConversation.id == conversation_id,
+                ChatConversation.analysis_id == analysis_id,
+            )
+        ).scalars()
+    ), None)
+
+
+def load_conversation(db: Session, conversation_id: UUID, limit: int = 200) -> list[ChatMessage]:
+    """Uma conversa, do começo, em ordem."""
     return list(
         db.execute(
             select(ChatMessage)
-            .where(ChatMessage.analysis_id == analysis_id)
+            .where(ChatMessage.conversation_id == conversation_id)
             .order_by(ChatMessage.seq.asc())
             .limit(limit)
         ).scalars()
     )
+
+
+def _conversation_title(question: str) -> str:
+    """A primeira pergunta, numa linha, é o nome da conversa na lista."""
+    title = " ".join(question.split())
+    if len(title) <= _CONVERSATION_TITLE_CHARS:
+        return title
+    return title[:_CONVERSATION_TITLE_CHARS - 1].rsplit(" ", 1)[0] + "…"
 
 
 def conversation_history(stored: list, limit: int) -> list[ChatHistoryMessage]:
@@ -738,27 +772,55 @@ def conversation_history(stored: list, limit: int) -> list[ChatHistoryMessage]:
     return recentes
 
 
-def persist_turn(db: Session, analysis_id: UUID, question: str, result: dict) -> None:
-    """Guarda pergunta e resposta, e nunca derruba a resposta se a gravação falhar.
+def persist_turn(
+    db: Session,
+    analysis_id: UUID,
+    conversation_id: UUID | None,
+    question: str,
+    result: dict,
+) -> UUID | None:
+    """Guarda pergunta e resposta na conversa, e nunca derruba a resposta se a gravação falhar.
+
+    Sem conversa, cria uma, com a pergunta como título, no mesmo commit das
+    mensagens: uma conversa vazia não fica para trás se a gravação falhar.
+    Devolve a conversa em que o turno ficou, ou None quando não ficou.
 
     O usuário já tem a resposta na tela quando isto roda; perder o registro é
     ruim, mas devolver 503 depois de ter respondido é pior.
     """
     try:
-        db.add_all([
-            ChatMessage(analysis_id=analysis_id, role="user", content=question),
+        rows = []
+        if conversation_id is None:
+            conversation_id = uuid4()
+            rows.append(ChatConversation(
+                id=conversation_id, analysis_id=analysis_id,
+                title=_conversation_title(question),
+            ))
+        else:
+            db.execute(
+                update(ChatConversation)
+                .where(ChatConversation.id == conversation_id)
+                .values(updated_at=func.now())
+            )
+        rows += [
+            ChatMessage(analysis_id=analysis_id, conversation_id=conversation_id,
+                        role="user", content=question),
             ChatMessage(
                 analysis_id=analysis_id,
+                conversation_id=conversation_id,
                 role="assistant",
                 content=result["answer"],
                 grounded=result["grounded"],
                 fallback_reason=result["fallback_reason"],
             ),
-        ])
+        ]
+        db.add_all(rows)
         db.commit()
+        return conversation_id
     except Exception:
         db.rollback()
         logger.exception("analysis_id=%s chat_persist=failed", analysis_id)
+        return None
 
 
 def answer_analysis_question(
