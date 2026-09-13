@@ -20,6 +20,7 @@ from schemas.user import RoleEnum
 # tests/test_delete_meeting.py confere esta lista contra o schema do banco.
 AI_ROWS_BY_ANALYSIS = (
     ("ai.chat_messages", "analysis_id"),
+    ("ai.chat_conversations", "analysis_id"),
     ("ai.chunk_passages", "analysis_id"),
     ("ai.meeting_chunks", "analysis_id"),
     ("ai.analysis_submissions", "analysis_id"),
