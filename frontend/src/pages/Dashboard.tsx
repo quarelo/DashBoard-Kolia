@@ -427,10 +427,11 @@ function ProductMeetingGroup({ label, color, dot, items, onOpen, emptyLabel }: {
 // que corta tudo que sai do viewport: cortava a primeira letra).
 const THEME_AXIS_WIDTH = 150;
 
-function ThemeAxisTick({ y, payload }: { y: number; payload: { value: string } }) {
+// O Recharts passa `y` como string | number: tipado só como number, o build quebrava.
+function ThemeAxisTick({ y, payload }: { y?: string | number; payload?: { value?: string | number } }) {
   return (
     <text x={4} y={y} dy={4} textAnchor="start" fontSize={11} fill="#6B7280">
-      {payload.value}
+      {payload?.value}
     </text>
   );
 }
