@@ -38,7 +38,7 @@ Navegador
 PostgreSQL 16 + pgvector :5433
   core.users · core.meeting_imports · core.meetings
   ai.meeting_analyses · ai.meeting_chunks · ai.chunk_passages
-  ai.analysis_submissions · ai.products · ai.chat_messages
+  ai.analysis_submissions · ai.products · ai.chat_conversations · ai.chat_messages
 ```
 
 ### O caminho de uma reunião
@@ -58,7 +58,8 @@ PostgreSQL 16 + pgvector :5433
 4. **Indexar.** Cada bloco vira passagens de ~400 tokens, embeddadas uma a uma.
    Status `DONE`.
 5. **Consultar.** O dashboard lê `ai.meeting_analyses` direto do banco. O chat só
-   abre com `DONE`, e a conversa fica guardada em `ai.chat_messages`.
+   abre com `DONE`. Cada reunião pode ter várias conversas, guardadas em
+   `ai.chat_conversations` e `ai.chat_messages`.
 
 ### Decisões que explicam o desenho
 
@@ -185,7 +186,9 @@ docker compose exec ollama nvidia-smi   # confirma que a GPU está visível
 | `GET /api/dashboard/overview`, `GET /api/dashboard/executive` | Números agregados, com filtros de UF, segmento, unidade, formato, CNAE e data |
 | `GET /api/dashboard/meetings`, `GET /api/dashboard/meetings/{analysis_id}` | Lista e detalhe das análises |
 | `DELETE /api/dashboard/meetings/{analysis_id}` | Excluir reunião e análise |
-| `GET` e `POST /api/dashboard/meetings/{analysis_id}/chat` | Conversa guardada e nova pergunta |
+| `GET /api/dashboard/meetings/{analysis_id}/chat/conversations` | Conversas da reunião, a mais recente primeiro |
+| `GET /api/dashboard/meetings/{analysis_id}/chat/conversations/{id}` | Mensagens de uma conversa |
+| `POST /api/dashboard/meetings/{analysis_id}/chat` | Nova pergunta; sem `conversation_id`, começa uma conversa |
 
 ### Serviço de IA (`:3000`, token de serviço)
 
@@ -198,7 +201,8 @@ docker compose exec ollama nvidia-smi   # confirma que a GPU está visível
 | `POST /analises/{id}/recompletar` | Pede de novo os campos que ficaram vazios |
 | `GET /analises/{id}/chunks` | Chunks e resumos parciais |
 | `POST /analises/{id}/buscar`, `GET /analises/{id}/evidencias` | Busca híbrida e evidências por categoria |
-| `GET` e `POST /analises/{id}/chat` | Conversa RAG limitada à reunião |
+| `GET /analises/{id}/conversas`, `GET /analises/{id}/conversas/{conversation_id}` | Conversas da reunião e mensagens de uma delas |
+| `POST /analises/{id}/chat` | Pergunta RAG limitada à reunião; sem `conversation_id`, começa uma conversa |
 
 O resumo fica em `final_summary` a partir de `DASHBOARD_READY`; os embeddings seguem
 até `DONE`. O chat só responde com evidência recuperada. Sem suporte suficiente,

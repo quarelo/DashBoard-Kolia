@@ -104,7 +104,10 @@ reunião.
    trechos.
 4. **Números:** números que não aparecem nas evidências derrubam a resposta.
 5. **Citações e histórico:** as citações são recortadas em torno da resposta (350
-   caracteres). A conversa fica em `ai.chat_messages` e volta ao reabrir a página.
+   caracteres). Cada reunião pode ter várias conversas (`ai.chat_conversations`), e
+   cada pergunta usa só o histórico da própria conversa. Sem `conversation_id`, a
+   pergunta começa uma conversa nova, com ela como título; as anteriores continuam
+   guardadas e reabríveis.
 
 ## 6. API atual
 
@@ -120,7 +123,10 @@ reunião.
 | `GET /analises/{id}/chunks` | chunks e resumos parciais |
 | `POST /analises/{id}/buscar` | busca híbrida |
 | `GET /analises/{id}/evidencias` | evidências por categoria |
-| `GET` e `POST /analises/{id}/chat` | histórico e nova pergunta |
+| `GET /analises/{id}/conversas` | conversas da reunião, a mexida por último primeiro |
+| `GET /analises/{id}/conversas/{conversation_id}` | mensagens de uma conversa |
+| `POST /analises/{id}/chat` | nova pergunta; sem `conversation_id`, começa uma conversa |
+| `GET /analises/{id}/chat` | mensagens da conversa mais recente |
 
 As estimativas vêm do histórico desta máquina. Elas usam a mediana por número de
 chunks, sem uma reta única, e mudam depois de uma troca de modelo ou de hardware.
@@ -134,10 +140,11 @@ chunks, sem uma reta única, e mudam depois de uma troca de modelo ou de hardwar
 | `ai.chunk_passages` | passagens de ~400 tokens com embedding e `tsvector` |
 | `ai.analysis_submissions` | chave de idempotência, hash do payload, análise criada |
 | `ai.products` | catálogo TOTVS (302 produtos) com embedding |
-| `ai.chat_messages` | conversa por análise |
+| `ai.chat_conversations` | conversas de cada análise, com título e última atividade |
+| `ai.chat_messages` | mensagens de cada conversa |
 
-As migrações vão de `0001` a `0008`, com `0007` = `chat_messages` e
-`0008` = `source_metadata`.
+As migrações vão de `0001` a `0009`, com `0007` = `chat_messages`,
+`0008` = `source_metadata` e `0009` = `chat_conversations`.
 
 ## 8. Limitações conhecidas
 
@@ -192,7 +199,7 @@ o modelo com que começou.
 ### Fase 4 — Chat contextual · feito
 
 - **Feito:** RAG com fontes, isolado por análise, com releitura, checagem de números
-  e histórico persistido.
+  e histórico persistido, com várias conversas por reunião.
 - **Pendente:** guardar em cada mensagem as fontes e o modelo usados.
 
 ### Fase 5 — Métricas e observabilidade · parcial
