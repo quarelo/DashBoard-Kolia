@@ -107,12 +107,34 @@ class ChunkPassage(Base):
     chunk: Mapped[MeetingChunk] = relationship(back_populates="passages")
 
 
-class ChatMessage(Base):
-    """Um turno da conversa sobre uma reunião.
+class ChatConversation(Base):
+    """Uma conversa sobre uma reunião; a mesma reunião pode ter várias.
 
-    Uma conversa por análise: o usuário escolhe a reunião e continua de onde
-    parou. Antes disto o histórico vivia só no payload que o navegador reenviava,
-    então recarregar a página apagava tudo.
+    Antes era uma conversa por análise, e o botão "Nova conversa" só limpava a
+    tela: a pergunta seguinte caía de novo na conversa guardada.
+    """
+
+    __tablename__ = "chat_conversations"
+    __table_args__ = (
+        Index("chat_conversations_analysis_updated_idx", "analysis_id", "updated_at"),
+        {"schema": "ai"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    analysis_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ai.meeting_analyses.id", ondelete="CASCADE"))
+    title: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now())
+
+
+class ChatMessage(Base):
+    """Um turno de uma conversa sobre uma reunião.
+
+    Guardado no servidor porque antes o histórico vivia só no payload que o
+    navegador reenviava, e recarregar a página apagava tudo.
     """
 
     __tablename__ = "chat_messages"
@@ -120,6 +142,7 @@ class ChatMessage(Base):
         CheckConstraint("role in ('user', 'assistant')",
                         name="chat_messages_role_check"),
         Index("chat_messages_analysis_seq_idx", "analysis_id", "seq"),
+        Index("chat_messages_conversation_seq_idx", "conversation_id", "seq"),
         {"schema": "ai"},
     )
 
@@ -129,6 +152,8 @@ class ChatMessage(Base):
     seq: Mapped[int] = mapped_column(BigInteger, Identity(always=False))
     analysis_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("ai.meeting_analyses.id", ondelete="CASCADE"))
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ai.chat_conversations.id", ondelete="CASCADE"))
     role: Mapped[str] = mapped_column(Text)
     content: Mapped[str] = mapped_column(Text)
     # O veredito do servidor guardado junto da mensagem: sem ele, reabrir a

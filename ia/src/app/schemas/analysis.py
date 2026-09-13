@@ -108,6 +108,8 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=2, max_length=500)
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=6)
     top_k: int = Field(default=4, ge=1, le=6)
+    # Sem conversa, a pergunta começa uma nova; com ela, continua aquela.
+    conversation_id: UUID | None = None
 
     @field_validator("question")
     @classmethod
@@ -148,11 +150,33 @@ class ChatMessageOut(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     analysis_id: UUID
+    conversation_id: UUID | None = None
+    messages: list[ChatMessageOut]
+
+
+class ChatConversationOut(BaseModel):
+    id: UUID
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatConversationListResponse(BaseModel):
+    analysis_id: UUID
+    conversations: list[ChatConversationOut]
+
+
+class ChatConversationResponse(BaseModel):
+    analysis_id: UUID
+    conversation_id: UUID
+    title: str
     messages: list[ChatMessageOut]
 
 
 class ChatResponse(BaseModel):
     analysis_id: UUID
+    # A conversa em que o turno foi guardado; None quando a gravação falhou.
+    conversation_id: UUID | None = None
     answer: str
     citations: list[ChatCitation]
     grounded: bool
