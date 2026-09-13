@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 CSV = "ID_MEETING,ANON_TRANSCRICAO\n100,locutor_1 Precisamos de 20 licenças.\n".encode()
 
-# Colunas NOT NULL e FKs de ia/migrations/versions 0001, 0003, 0004 e 0007.
+# Colunas NOT NULL e FKs de ia/migrations/versions 0001, 0003, 0004, 0007 e 0009.
 AI_DDL = """
 CREATE SCHEMA IF NOT EXISTS ai;
 CREATE TABLE IF NOT EXISTS ai.meeting_analyses (
@@ -30,9 +30,14 @@ CREATE TABLE IF NOT EXISTS ai.chunk_passages (
     chunk_id uuid NOT NULL REFERENCES ai.meeting_chunks(id) ON DELETE CASCADE,
     analysis_id uuid NOT NULL, passage_index integer NOT NULL,
     content text NOT NULL, token_count integer NOT NULL);
+CREATE TABLE IF NOT EXISTS ai.chat_conversations (
+    id uuid PRIMARY KEY,
+    analysis_id uuid NOT NULL REFERENCES ai.meeting_analyses(id) ON DELETE CASCADE,
+    title text NOT NULL);
 CREATE TABLE IF NOT EXISTS ai.chat_messages (
     id uuid PRIMARY KEY,
     analysis_id uuid NOT NULL REFERENCES ai.meeting_analyses(id) ON DELETE CASCADE,
+    conversation_id uuid NOT NULL REFERENCES ai.chat_conversations(id) ON DELETE CASCADE,
     role text NOT NULL, content text NOT NULL);
 CREATE TABLE IF NOT EXISTS ai.analysis_submissions (
     key varchar(64) PRIMARY KEY, payload_hash varchar(64) NOT NULL,
@@ -81,8 +86,8 @@ def insert_analysis(factory, status="DONE"):
     """An analysis with one row in every `ai` table that hangs off it."""
     analysis_id = uuid4()
     ids = {"a": str(analysis_id), "c": str(uuid4()), "m": str(uuid4()),
-           "p": str(uuid4()), "msg": str(uuid4()), "k": uuid4().hex * 2, "h": "0" * 64,
-           "status": status}
+           "p": str(uuid4()), "conv": str(uuid4()), "msg": str(uuid4()),
+           "k": uuid4().hex * 2, "h": "0" * 64, "status": status}
     with factory() as db:
         for statement in (
             "INSERT INTO ai.meeting_analyses (id, external_meeting_id, title, status, total_tokens, total_chunks)"
@@ -91,7 +96,9 @@ def insert_analysis(factory, status="DONE"):
             " VALUES (:c, :a, :m, 1, 3, 'texto')",
             "INSERT INTO ai.chunk_passages (id, chunk_id, analysis_id, passage_index, content, token_count)"
             " VALUES (:p, :c, :a, 0, 'texto', 1)",
-            "INSERT INTO ai.chat_messages (id, analysis_id, role, content) VALUES (:msg, :a, 'user', 'Qual o prazo?')",
+            "INSERT INTO ai.chat_conversations (id, analysis_id, title) VALUES (:conv, :a, 'Qual o prazo?')",
+            "INSERT INTO ai.chat_messages (id, analysis_id, conversation_id, role, content)"
+            " VALUES (:msg, :a, :conv, 'user', 'Qual o prazo?')",
             "INSERT INTO ai.analysis_submissions (key, payload_hash, analysis_id) VALUES (:k, :h, :a)",
         ):
             db.execute(text(statement), ids)
