@@ -6,6 +6,8 @@ import type {
   ExecutiveDashboard,
   FinalSummary,
   Priority,
+  ProductMeetingItem,
+  ProductMeetings,
   SentimentClass,
 } from "../types";
 
@@ -66,6 +68,22 @@ interface RawRankedMeeting {
   motivo: string;
 }
 
+interface RawProductMeetingItem {
+  analysis_id: string;
+  external_meeting_id: string;
+  titulo: string;
+  uf: string | null;
+  segmento: string | null;
+  itens: string[];
+}
+
+interface RawProductMeetings {
+  produto: string;
+  reclamacoes: RawProductMeetingItem[];
+  gaps: RawProductMeetingItem[];
+  elogios: RawProductMeetingItem[];
+}
+
 interface RawOverview {
   total: number;
   analyzed: number;
@@ -120,6 +138,17 @@ function toDetail(raw: RawDetail): AnalysisDetail {
   };
 }
 
+function toProductMeetingItem(raw: RawProductMeetingItem): ProductMeetingItem {
+  return {
+    analysisId: raw.analysis_id,
+    externalMeetingId: raw.external_meeting_id,
+    titulo: raw.titulo,
+    uf: raw.uf,
+    segmento: raw.segmento,
+    itens: raw.itens ?? [],
+  };
+}
+
 function toRankedMeeting(raw: RawRankedMeeting) {
   return {
     analysisId: raw.analysis_id,
@@ -162,6 +191,20 @@ export const dashboardService = {
       })),
       top5Risco: (raw.top5_risco ?? []).map(toRankedMeeting),
       top5Oportunidade: (raw.top5_oportunidade ?? []).map(toRankedMeeting),
+    };
+  },
+
+  /** Reuniões por trás das reclamações/gaps/elogios de um produto — o clique
+   * numa barra do Gráfico de Produto. */
+  async productMeetings(nome: string): Promise<ProductMeetings> {
+    const raw = await apiRequest<RawProductMeetings>(
+      `/api/dashboard/products/${encodeURIComponent(nome)}/meetings`,
+    );
+    return {
+      produto: raw.produto,
+      reclamacoes: (raw.reclamacoes ?? []).map(toProductMeetingItem),
+      gaps: (raw.gaps ?? []).map(toProductMeetingItem),
+      elogios: (raw.elogios ?? []).map(toProductMeetingItem),
     };
   },
 

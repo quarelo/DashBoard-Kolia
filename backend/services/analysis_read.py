@@ -397,6 +397,71 @@ def executive_overview(
     }
 
 
+def product_meetings(
+    db: Session,
+    nome: str,
+    *,
+    uf: str | None = None,
+    segmento: str | None = None,
+    unidade: str | None = None,
+    formato: str | None = None,
+    cnae: str | None = None,
+    dt_meeting_from: str | None = None,
+    dt_meeting_to: str | None = None,
+) -> dict:
+    """Reuniões por trás dos números de um produto no Gráfico de Produto.
+
+    Mesma limitação de :func:`executive_overview`: só entra reunião que cita
+    esse produto sozinho (``final_summary.produto`` com um único item) — é a
+    mesma aproximação usada para contar ``reclamacoes``/``gaps``/``elogios``
+    por produto, então o número na barra e a lista de reuniões por trás dele
+    batem sempre.
+    """
+    extra_where, params = _build_filters(
+        uf=uf, segmento=segmento, unidade=unidade, formato=formato,
+        cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+    )
+    query = _BASE_SELECT + ((" WHERE 1=1" + extra_where) if extra_where else "")
+    rows = db.execute(text(query), params).all()
+
+    reclamacoes: list[dict] = []
+    gaps: list[dict] = []
+    elogios: list[dict] = []
+
+    for row in rows:
+        fs = row.final_summary if isinstance(row.final_summary, dict) else {}
+        products = _as_list(fs.get("produto"))
+        if len(products) != 1 or products[0] != nome:
+            continue
+
+        sentimento = _summary_block(fs, "sentimento")
+        metadata = row.meeting_metadata or {}
+        meeting_entry = {
+            "analysis_id": str(row.analysis_id),
+            "external_meeting_id": row.meeting_external_id or str(row.external_meeting_id),
+            "titulo": row.title,
+            "uf": str(metadata.get("UF") or "").strip().upper() or None,
+            "segmento": str(metadata.get("NOME_SEGMENTO") or "").strip() or None,
+        }
+
+        problemas = _as_list(fs.get("problemas_identificados"))
+        if problemas:
+            reclamacoes.append({**meeting_entry, "itens": problemas})
+
+        gap_itens = _as_list(fs.get("gap_produto"))
+        if gap_itens:
+            gaps.append({**meeting_entry, "itens": gap_itens})
+
+        # Mesmo critério do agregado: feedback só vira elogio quando o
+        # sentimento geral da reunião já foi classificado como positivo.
+        if sentimento.get("classificacao") == "positivo":
+            feedback_itens = _as_list(fs.get("feedback_produto"))
+            if feedback_itens:
+                elogios.append({**meeting_entry, "itens": feedback_itens})
+
+    return {"produto": nome, "reclamacoes": reclamacoes, "gaps": gaps, "elogios": elogios}
+
+
 def overview(
     db: Session,
     recent_limit: int = 5,

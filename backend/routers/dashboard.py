@@ -66,6 +66,27 @@ def dashboard_executive(
     )
 
 
+@router.get("/products/{nome}/meetings")
+def dashboard_product_meetings(
+    nome: str,
+    uf: str | None = Query(None, description="Filtra por UF (estado), ex: SP, RJ."),
+    segmento: str | None = Query(None, description="Filtra por NOME_SEGMENTO (contém, case-insensitive)."),
+    unidade: str | None = Query(None, description="Filtra por NOME_UNIDADE (contém, case-insensitive)."),
+    formato: str | None = Query(None, description="Filtra por FORMATO_MEETING, ex: Vídeo, Presencial."),
+    cnae: str | None = Query(None, description="Filtra por CNAE (exato)."),
+    dt_meeting_from: str | None = Query(None, description="Data da reunião a partir de (YYYY-MM-DD)."),
+    dt_meeting_to: str | None = Query(None, description="Data da reunião até (YYYY-MM-DD)."),
+    _user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Reuniões que sustentam as reclamações/gaps/elogios de um produto no
+    Gráfico de Produto — usado quando o gestor clica numa barra."""
+    return analysis_read.product_meetings(
+        db, nome, uf=uf, segmento=segmento, unidade=unidade, formato=formato,
+        cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+    )
+
+
 @router.get("/meetings")
 def dashboard_meetings(
     offset: int = Query(0, ge=0),

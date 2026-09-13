@@ -3,7 +3,9 @@ import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   BarChart, Legend,
 } from "recharts";
-import { FileText, Clock, Package, AlertTriangle, TrendingUp, Filter, ChevronDown, X } from "lucide-react";
+import {
+  FileText, Clock, Package, AlertTriangle, TrendingUp, Filter, ChevronDown, X, Loader2,
+} from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { KpiCard } from "../components/ui/KpiCard";
 import { Card, CardContent, CardHeader, CardTitle, CardSubtitle } from "../components/ui/Card";
@@ -14,8 +16,8 @@ import {
 import { useAsync } from "../lib/useAsync";
 import { PageError, PageLoader } from "../components/ui/PageState";
 import type {
-  ExecutiveDashboard, MonthlyComparison, ProductBreakdown, RankedMeeting,
-  SegmentRiskOpportunity, ThemeRanking, UfRisk,
+  ExecutiveDashboard, MonthlyComparison, ProductBreakdown, ProductMeetingItem,
+  RankedMeeting, SegmentRiskOpportunity, ThemeRanking, UfRisk,
 } from "../types";
 
 const RISK_COLOR = "#ef4444";
@@ -48,6 +50,10 @@ export function Dashboard() {
     [top5Uf, top5Segmento],
   );
 
+  // Produto selecionado no Gráfico de Produto (clique numa barra abre o
+  // detalhe); null = modal fechado, sem chamada extra.
+  const [selectedProduct, setSelectedProduct] = useState<string | null>(null);
+
   if (loading) return <PageLoader label="Carregando indicadores..." />;
   if (error || !data) return <PageError message={error ?? "Sem dados."} onRetry={reload} />;
 
@@ -71,7 +77,7 @@ export function Dashboard() {
 
       <KpiRow data={data} />
       <MonthlyComparisonSection items={data.comparativoMensal} />
-      <ProductSection items={data.topProdutos} />
+      <ProductSection items={data.topProdutos} onSelectProduct={setSelectedProduct} />
       <ThemesSection items={data.temas} />
 
       <div className="grid lg:grid-cols-2 gap-4 items-start">
@@ -114,6 +120,10 @@ export function Dashboard() {
             : "Nenhuma oportunidade comercial identificada no período."}
         />
       </div>
+
+      {selectedProduct && (
+        <ProductMeetingsModal nome={selectedProduct} onClose={() => setSelectedProduct(null)} />
+      )}
     </div>
   );
 }
@@ -187,7 +197,10 @@ function MonthlyComparisonSection({ items }: { items: MonthlyComparison[] }) {
 /* ── 3. Gráfico de produto ─────────────────────────────────────────────── */
 const PRODUCT_LIST_HEIGHT = "max-h-[288px] overflow-y-auto pr-1";
 
-function ProductSection({ items }: { items: ProductBreakdown[] }) {
+function ProductSection({ items, onSelectProduct }: {
+  items: ProductBreakdown[];
+  onSelectProduct: (nome: string) => void;
+}) {
   const hasBreakdown = items.some((p) => p.reclamacoes != null || p.gaps != null || p.elogios != null);
   const maxMentions = Math.max(1, ...items.map((p) => p.mencoes));
 
@@ -195,7 +208,7 @@ function ProductSection({ items }: { items: ProductBreakdown[] }) {
     <Card>
       <CardHeader>
         <CardTitle>O Gráfico de Produto</CardTitle>
-        <CardSubtitle>Reclamações, gaps e elogios por produto citado nas reuniões</CardSubtitle>
+        <CardSubtitle>Reclamações, gaps e elogios por produto citado nas reuniões — clique numa barra para ver as reuniões</CardSubtitle>
       </CardHeader>
       <CardContent className="space-y-3">
         {items.length === 0 ? (
@@ -204,7 +217,7 @@ function ProductSection({ items }: { items: ProductBreakdown[] }) {
           <>
             <div className={`space-y-3 ${PRODUCT_LIST_HEIGHT}`}>
               {items.map((product) => (
-                <ProductBar key={product.nome} product={product} maxMentions={maxMentions} />
+                <ProductBar key={product.nome} product={product} maxMentions={maxMentions} onSelect={onSelectProduct} />
               ))}
             </div>
             {hasBreakdown && (
@@ -222,7 +235,11 @@ function ProductSection({ items }: { items: ProductBreakdown[] }) {
   );
 }
 
-function ProductBar({ product, maxMentions }: { product: ProductBreakdown; maxMentions: number }) {
+function ProductBar({ product, maxMentions, onSelect }: {
+  product: ProductBreakdown;
+  maxMentions: number;
+  onSelect: (nome: string) => void;
+}) {
   const { nome, mencoes, reclamacoes, gaps, elogios } = product;
   const hasDetail = reclamacoes != null || gaps != null || elogios != null;
   const total = (reclamacoes ?? 0) + (gaps ?? 0) + (elogios ?? 0);
@@ -230,9 +247,13 @@ function ProductBar({ product, maxMentions }: { product: ProductBreakdown; maxMe
   const widthPct = Math.max(6, (mencoes / maxMentions) * 100);
 
   return (
-    <div>
+    <div
+      onClick={hasDetail && total > 0 ? () => onSelect(nome) : undefined}
+      className={hasDetail && total > 0 ? "cursor-pointer group" : undefined}
+      title={hasDetail && total > 0 ? `Ver reuniões de ${nome}` : undefined}
+    >
       <div className="flex items-center justify-between text-xs mb-1">
-        <span className="font-semibold text-ink truncate pr-2" title={nome}>{nome}</span>
+        <span className="font-semibold text-ink truncate pr-2 group-hover:underline" title={nome}>{nome}</span>
         <span className="text-ink-muted flex-shrink-0 tabular-nums">{mencoes} menç{mencoes === 1 ? "ão" : "ões"}</span>
       </div>
       <div className="h-3.5 rounded-full bg-surface overflow-hidden flex" style={{ width: `${widthPct}%` }}>
@@ -283,7 +304,136 @@ function LegendDot({ color, label }: { color: string; label: string }) {
   );
 }
 
+/** Reuniões por trás dos números de um produto, agrupadas por reclamação/gap/
+ * elogio — aberto ao clicar numa barra do Gráfico de Produto. */
+function ProductMeetingsModal({ nome, onClose }: { nome: string; onClose: () => void }) {
+  const { data, loading, error } = useAsync(() => dashboardService.productMeetings(nome), [nome]);
+  const navigate = useNavigate();
+
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/25 backdrop-blur-[2px] z-40 animate-fade-in" onClick={onClose} />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="product-meetings-title"
+          className="pointer-events-auto w-full max-w-2xl max-h-[85vh] flex flex-col bg-white border border-gray-200 rounded-2xl shadow-2xl"
+        >
+          <div className="flex items-start justify-between gap-3 p-5 border-b border-surface-border flex-shrink-0">
+            <div className="min-w-0">
+              <h2 id="product-meetings-title" className="text-base font-bold text-ink truncate">{nome}</h2>
+              <p className="text-xs text-ink-secondary mt-0.5">
+                Reuniões que sustentam as reclamações, gaps e elogios deste produto
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-surface transition-colors flex-shrink-0"
+            >
+              <X size={16} />
+            </button>
+          </div>
+
+          <div className="overflow-y-auto p-5 space-y-5">
+            {loading ? (
+              <div className="h-32 flex items-center justify-center gap-2 text-xs text-ink-muted">
+                <Loader2 size={14} className="animate-spin" /> Carregando reuniões...
+              </div>
+            ) : error || !data ? (
+              <p className="text-xs text-ink-secondary py-6 text-center">{error ?? "Não foi possível carregar as reuniões."}</p>
+            ) : (
+              <>
+                <ProductMeetingGroup
+                  label="Reclamações" color="text-rose-600" dot="bg-rose-500"
+                  items={data.reclamacoes} onOpen={(id) => navigate(`/app/meetings/${id}`)}
+                  emptyLabel="Nenhuma reclamação registrada para este produto."
+                />
+                <ProductMeetingGroup
+                  label="Gaps" color="text-amber-600" dot="bg-amber-400"
+                  items={data.gaps} onOpen={(id) => navigate(`/app/meetings/${id}`)}
+                  emptyLabel="Nenhum gap registrado para este produto."
+                />
+                <ProductMeetingGroup
+                  label="Elogios" color="text-emerald-600" dot="bg-emerald-500"
+                  items={data.elogios} onOpen={(id) => navigate(`/app/meetings/${id}`)}
+                  emptyLabel="Nenhum elogio registrado para este produto."
+                />
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ProductMeetingGroup({ label, color, dot, items, onOpen, emptyLabel }: {
+  label: string;
+  color: string;
+  dot: string;
+  items: ProductMeetingItem[];
+  onOpen: (analysisId: string) => void;
+  emptyLabel: string;
+}) {
+  return (
+    <div>
+      <h3 className={`text-xs font-bold uppercase tracking-wide flex items-center gap-1.5 mb-2 ${color}`}>
+        <span className={`w-2 h-2 rounded-full ${dot}`} />
+        {label} ({items.length})
+      </h3>
+      {items.length === 0 ? (
+        <p className="text-xs text-ink-muted">{emptyLabel}</p>
+      ) : (
+        <div className="space-y-2">
+          {items.map((item) => (
+            <div
+              key={item.analysisId}
+              onClick={() => onOpen(item.analysisId)}
+              className="px-3 py-2 rounded-lg border border-surface-border hover:bg-surface cursor-pointer transition-colors"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold text-ink truncate">
+                  Reunião {item.externalMeetingId}
+                  {(item.uf || item.segmento) && (
+                    <span className="text-ink-secondary font-normal">
+                      {" "}({[item.uf, item.segmento].filter(Boolean).join(" · ")})
+                    </span>
+                  )}
+                </p>
+              </div>
+              <ul className="mt-1 space-y-0.5">
+                {item.itens.map((texto, i) => (
+                  <li key={i} className="text-xs text-ink-secondary line-clamp-2">• {texto}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── 4. Temas e objeções ───────────────────────────────────────────────── */
+
+// Recharts alinha o rótulo do eixo Y à direita por padrão (encostado nas
+// barras) — como o texto é curto ("Gap", "Ação"), sobra um vão em branco à
+// esquerda, antes do texto começar. Este tick customizado alinha o texto à
+// esquerda, a poucos pixels da borda do card (x absoluto, não relativo ao `x`
+// do tick — o `x` do tick é a posição da própria linha do eixo, rente às
+// barras, e subtrair a largura do eixo dali jogava o texto para fora do SVG,
+// que corta tudo que sai do viewport: cortava a primeira letra).
+const THEME_AXIS_WIDTH = 150;
+
+function ThemeAxisTick({ y, payload }: { y: number; payload: { value: string } }) {
+  return (
+    <text x={4} y={y} dy={4} textAnchor="start" fontSize={11} fill="#6B7280">
+      {payload.value}
+    </text>
+  );
+}
 
 function ThemesSection({ items }: { items: ThemeRanking[] }) {
   const chartData = items.map((t) => ({ ...t, label: themeLabel(t.tema) }));
@@ -301,7 +451,7 @@ function ThemesSection({ items }: { items: ThemeRanking[] }) {
             <BarChart data={chartData} layout="vertical" margin={{ top: 0, right: 24, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" horizontal={false} />
               <XAxis type="number" allowDecimals={false} tick={{ fontSize: 10, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
-              <YAxis type="category" dataKey="label" width={150} tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false} />
+              <YAxis type="category" dataKey="label" width={THEME_AXIS_WIDTH} tick={ThemeAxisTick} axisLine={false} tickLine={false} />
               <Tooltip formatter={(v) => [`${v} ocorrências`, ""]} />
               <Bar dataKey="ocorrencias" fill={NEUTRAL_COLOR} radius={[0, 4, 4, 0]} barSize={16} />
             </BarChart>
