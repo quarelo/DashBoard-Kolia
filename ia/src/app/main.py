@@ -15,6 +15,7 @@ from src.app.schemas.analysis import (
     SemanticSearchRequest, SemanticSearchResponse,
     CategoryEvidenceResponse,
     ChatRequest, ChatResponse, ChatHistoryResponse,
+    ChatConversationListResponse, ChatConversationResponse,
 )
 from src.app.services.analysis_service import build_analysis_progress, prepare_analysis
 from src.app.services.llm_service import (
@@ -24,8 +25,8 @@ from src.app.services.analysis_worker import AnalysisWorker
 from src.app.services.analysis_submission import SubmissionConflict, submit_idempotent
 from src.app.services.eta_service import estimate_analysis, estimate_backlog, estimate_batch
 from src.app.services.chat_service import (
-    answer_analysis_question, conversation_history, load_conversation,
-    persist_turn,
+    answer_analysis_question, conversation_history, get_conversation,
+    list_conversations, load_conversation, persist_turn,
 )
 
 # Quantas mensagens do passado o modelo vê. Seis é o teto que ChatRequest já
@@ -237,6 +238,56 @@ def category_evidence(
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
+def _message_out(message) -> dict:
+    return {
+        "role": message.role,
+        "content": message.content,
+        "grounded": message.grounded,
+        "fallback_reason": message.fallback_reason,
+        "created_at": message.created_at,
+    }
+
+
+@app.get(
+    "/analises/{analysis_id}/conversas",
+    response_model=ChatConversationListResponse,
+)
+def chat_conversations(
+    analysis_id: UUID,
+    db: Session = Depends(get_db),
+):
+    """As conversas desta reunião, a mexida por último primeiro."""
+    return {
+        "analysis_id": analysis_id,
+        "conversations": [
+            {"id": conversation.id, "title": conversation.title,
+             "created_at": conversation.created_at, "updated_at": conversation.updated_at}
+            for conversation in list_conversations(db, analysis_id)
+        ],
+    }
+
+
+@app.get(
+    "/analises/{analysis_id}/conversas/{conversation_id}",
+    response_model=ChatConversationResponse,
+)
+def chat_conversation(
+    analysis_id: UUID,
+    conversation_id: UUID,
+    db: Session = Depends(get_db),
+):
+    """Uma conversa desta reunião, do começo, para a tela reabri-la."""
+    conversation = get_conversation(db, analysis_id, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversa não encontrada nesta reunião.")
+    return {
+        "analysis_id": analysis_id,
+        "conversation_id": conversation.id,
+        "title": conversation.title,
+        "messages": [_message_out(message) for message in load_conversation(db, conversation.id)],
+    }
+
+
 @app.get(
     "/analises/{analysis_id}/chat",
     response_model=ChatHistoryResponse,
@@ -245,19 +296,14 @@ def chat_history(
     analysis_id: UUID,
     db: Session = Depends(get_db),
 ):
-    """A conversa desta reunião, para a tela reabrir de onde parou."""
+    """A conversa mais recente desta reunião, para quem ainda não lista as conversas."""
+    conversations = list_conversations(db, analysis_id)
+    latest = conversations[0] if conversations else None
     return {
         "analysis_id": analysis_id,
-        "messages": [
-            {
-                "role": message.role,
-                "content": message.content,
-                "grounded": message.grounded,
-                "fallback_reason": message.fallback_reason,
-                "created_at": message.created_at,
-            }
-            for message in load_conversation(db, analysis_id)
-        ],
+        "conversation_id": latest.id if latest else None,
+        "messages": [_message_out(message) for message in load_conversation(db, latest.id)]
+        if latest else [],
     }
 
 
@@ -273,15 +319,23 @@ def chat_with_analysis(
     try:
         # A conversa guardada é a fonte da verdade, não o que o cliente reenvia:
         # antes disto o histórico morria ao recarregar a página, e dois clientes
-        # abertos na mesma reunião viam conversas diferentes.
-        stored = load_conversation(db, analysis_id)
-        if stored:
-            payload = payload.model_copy(update={
-                "history": conversation_history(stored, _HISTORY_TURNS)
-            })
+        # abertos na mesma reunião viam conversas diferentes. Sem conversa, a
+        # pergunta começa uma nova, sem passado, mesmo que o cliente mande um.
+        history = []
+        if payload.conversation_id is not None:
+            conversation = get_conversation(db, analysis_id, payload.conversation_id)
+            if conversation is None:
+                raise HTTPException(
+                    status_code=404, detail="Conversa não encontrada nesta reunião.")
+            history = conversation_history(
+                load_conversation(db, conversation.id), _HISTORY_TURNS)
+        payload = payload.model_copy(update={"history": history})
         result = answer_analysis_question(db, analysis_id, payload)
-        persist_turn(db, analysis_id, payload.question, result)
-        return result
+        conversation_id = persist_turn(
+            db, analysis_id, payload.conversation_id, payload.question, result)
+        return {**result, "conversation_id": conversation_id}
+    except HTTPException:
+        raise
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except RagNotReadyError as error:
