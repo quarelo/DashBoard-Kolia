@@ -17,6 +17,8 @@ export interface ChatAnswer {
     | "unsupported_answer"
     | "unsafe_request"
     | null;
+  // A conversa em que o turno ficou guardado; null se a gravação falhou.
+  conversation_id: string | null;
 }
 
 type HistoryTurn = { role: "user" | "assistant"; content: string };
@@ -27,6 +29,13 @@ export interface StoredMessage {
   grounded: boolean | null;
   fallback_reason: string | null;
   created_at: string;
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export const fallbackMessages: Record<string, string> = {
@@ -46,18 +55,27 @@ export const chatService = {
       .map((item) => ({ analysisId: item.analysisId, title: item.title }));
   },
 
-  // A conversa é guardada no servidor: recarregar a página não apaga mais nada.
-  async history(analysisId: string): Promise<StoredMessage[]> {
+  // Uma reunião pode ter várias conversas, guardadas no servidor.
+  async conversations(analysisId: string): Promise<ConversationSummary[]> {
+    const { conversations } = await apiRequest<{ conversations: ConversationSummary[] }>(
+      `/api/dashboard/meetings/${analysisId}/chat/conversations`,
+    );
+    return conversations;
+  },
+
+  async conversation(analysisId: string, conversationId: string): Promise<StoredMessage[]> {
     const { messages } = await apiRequest<{ messages: StoredMessage[] }>(
-      `/api/dashboard/meetings/${analysisId}/chat`,
+      `/api/dashboard/meetings/${analysisId}/chat/conversations/${conversationId}`,
     );
     return messages;
   },
 
+  // Sem conversationId, a pergunta começa uma conversa nova; a resposta traz o id dela.
   async ask(
     analysisId: string,
     question: string,
     history: HistoryTurn[],
+    conversationId: string | null,
   ): Promise<ChatAnswer> {
     // A IA só aceita histórico alternado começando em "user" e terminando em
     // "assistant"; mandamos os últimos pares completos.
@@ -68,7 +86,11 @@ export const chatService = {
 
     return apiRequest<ChatAnswer>(`/api/dashboard/meetings/${analysisId}/chat`, {
       method: "POST",
-      body: { question, history: clean },
+      body: {
+        question,
+        history: clean,
+        ...(conversationId ? { conversation_id: conversationId } : {}),
+      },
     });
   },
 
