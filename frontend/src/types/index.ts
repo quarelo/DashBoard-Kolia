@@ -167,6 +167,22 @@ export interface RankedMeeting {
   motivo: string;
 }
 
+export interface ProductMeetingItem {
+  analysisId: string;
+  externalMeetingId: string;
+  titulo: string;
+  uf: string | null;
+  segmento: string | null;
+  itens: string[];
+}
+
+export interface ProductMeetings {
+  produto: string;
+  reclamacoes: ProductMeetingItem[];
+  gaps: ProductMeetingItem[];
+  elogios: ProductMeetingItem[];
+}
+
 export interface ExecutiveDashboard {
   kpis: ExecutiveKpis;
   comparativoMensal: MonthlyComparison[];
