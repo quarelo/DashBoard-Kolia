@@ -216,16 +216,18 @@ class ChatSession:
     responder, e uma sessão sem `execute` viraria 503 mascarando o erro real.
     """
 
-    def __init__(self, stored=()):
+    def __init__(self, stored=(), results=None):
+        # Cada `execute` devolve o próximo item de `results`; quando acabam, `stored`.
         self._stored = list(stored)
+        self._results = [list(rows) for rows in results] if results else []
         self.saved = []
 
     def execute(self, _statement):
-        stored = self._stored
+        rows = self._results.pop(0) if self._results else self._stored
 
         class _Result:
             def scalars(self):
-                return iter(stored)
+                return iter(rows)
 
         return _Result()
 
@@ -381,14 +383,11 @@ def test_chat_rejects_invalid_history_before_database_access():
     assert response.status_code == 422
 
 
-def test_chat_saves_the_turn_and_prefers_the_stored_conversation(monkeypatch):
-    """A conversa guardada manda, não o que o cliente reenvia.
+CONVERSATION_ID = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
 
-    Antes disto o histórico vivia só no payload do navegador: recarregar a
-    página apagava a conversa, e duas abas na mesma reunião divergiam.
-    """
-    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-    guardadas = [
+
+def _stored_turns():
+    return [
         SimpleNamespace(role="user", content="Quantas lojas o cliente tem?",
                         grounded=None, fallback_reason=None,
                         created_at=datetime(2026, 9, 9, 12, 0)),
@@ -396,10 +395,15 @@ def test_chat_saves_the_turn_and_prefers_the_stored_conversation(monkeypatch):
                         grounded=True, fallback_reason=None,
                         created_at=datetime(2026, 9, 9, 12, 0, 5)),
     ]
-    sessao = ChatSession(guardadas)
-    app.dependency_overrides[get_db] = lambda: sessao
-    visto = {}
 
+
+def _conversation(conversation_id=CONVERSATION_ID, title="Quantas lojas o cliente tem?"):
+    return SimpleNamespace(id=conversation_id, title=title,
+                           created_at=datetime(2026, 9, 9, 12, 0),
+                           updated_at=datetime(2026, 9, 9, 12, 0, 5))
+
+
+def _answer_recording(visto):
     def fake_answer(_db, current_id, payload):
         visto["history"] = [(m.role, m.content) for m in payload.history]
         return {
@@ -409,28 +413,134 @@ def test_chat_saves_the_turn_and_prefers_the_stored_conversation(monkeypatch):
             "grounded": True,
             "fallback_reason": None,
         }
+    return fake_answer
 
-    monkeypatch.setattr(main, "answer_analysis_question", fake_answer)
+
+INVENTED_HISTORY = [
+    {"role": "user", "content": "histórico que o cliente inventou"},
+    {"role": "assistant", "content": "resposta que o cliente inventou"},
+]
+
+
+def test_chat_continues_the_chosen_conversation_with_its_stored_history(monkeypatch):
+    """A conversa guardada manda, não o que o cliente reenvia.
+
+    Antes disto o histórico vivia só no payload do navegador: recarregar a
+    página apagava a conversa, e duas abas na mesma reunião divergiam.
+    """
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    sessao = ChatSession(results=[[_conversation()], _stored_turns()])
+    app.dependency_overrides[get_db] = lambda: sessao
+    visto = {}
+    monkeypatch.setattr(main, "answer_analysis_question", _answer_recording(visto))
     try:
         response = client.post(
             f"/analises/{analysis_id}/chat",
-            json={"question": "Em que estado?", "history": [
-                {"role": "user", "content": "histórico que o cliente inventou"},
-                {"role": "assistant", "content": "resposta que o cliente inventou"},
-            ]},
+            json={"question": "Em que estado?", "conversation_id": str(CONVERSATION_ID),
+                  "history": INVENTED_HISTORY},
         )
     finally:
         app.dependency_overrides.clear()
 
     assert response.status_code == 200
+    assert response.json()["conversation_id"] == str(CONVERSATION_ID)
     assert visto["history"] == [
         ("user", "Quantas lojas o cliente tem?"),
         ("assistant", "15 lojas."),
     ], "o histórico do banco deve substituir o que o cliente mandou"
-    assert [(m.role, m.content) for m in sessao.saved] == [
-        ("user", "Em que estado?"),
-        ("assistant", "São Paulo."),
+    mensagens = [item for item in sessao.saved if hasattr(item, "role")]
+    assert [(m.role, m.content, m.conversation_id) for m in mensagens] == [
+        ("user", "Em que estado?", CONVERSATION_ID),
+        ("assistant", "São Paulo.", CONVERSATION_ID),
     ]
+
+
+def test_a_question_without_a_conversation_starts_a_new_one(monkeypatch):
+    """O botão "Nova conversa" só limpava a tela: a pergunta seguinte caía na
+    conversa guardada da reunião. Sem `conversation_id`, agora nasce outra, sem
+    passado, e as anteriores continuam guardadas à parte."""
+    from src.app.models.analysis import ChatConversation
+
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    sessao = ChatSession(stored=_stored_turns())
+    app.dependency_overrides[get_db] = lambda: sessao
+    visto = {}
+    monkeypatch.setattr(main, "answer_analysis_question", _answer_recording(visto))
+    try:
+        response = client.post(
+            f"/analises/{analysis_id}/chat",
+            json={"question": "Qual o prazo da implantação?", "history": INVENTED_HISTORY},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert visto["history"] == []
+    conversas = [item for item in sessao.saved if isinstance(item, ChatConversation)]
+    assert len(conversas) == 1
+    assert conversas[0].analysis_id == analysis_id
+    assert conversas[0].title == "Qual o prazo da implantação?"
+    assert response.json()["conversation_id"] == str(conversas[0].id)
+    mensagens = [item for item in sessao.saved if hasattr(item, "role")]
+    assert {m.conversation_id for m in mensagens} == {conversas[0].id}
+
+
+def test_a_conversation_that_is_not_of_this_meeting_is_404(monkeypatch):
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    app.dependency_overrides[get_db] = lambda: ChatSession(results=[[]])
+    monkeypatch.setattr(
+        main, "answer_analysis_question",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("não deveria responder")),
+    )
+    try:
+        response = client.post(
+            f"/analises/{analysis_id}/chat",
+            json={"question": "Qual produto?", "conversation_id": str(CONVERSATION_ID)},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Conversa não encontrada nesta reunião."
+
+
+def test_conversations_endpoint_lists_the_meeting_conversations():
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    outra = UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")
+    app.dependency_overrides[get_db] = lambda: ChatSession(results=[[
+        _conversation(outra, "Quais os riscos?"), _conversation(),
+    ]])
+    try:
+        response = client.get(f"/analises/{analysis_id}/conversas")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert [(c["id"], c["title"]) for c in response.json()["conversations"]] == [
+        (str(outra), "Quais os riscos?"),
+        (str(CONVERSATION_ID), "Quantas lojas o cliente tem?"),
+    ]
+
+
+def test_conversation_endpoint_returns_that_conversation_or_404():
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    app.dependency_overrides[get_db] = lambda: ChatSession(results=[[_conversation()], _stored_turns()])
+    try:
+        response = client.get(f"/analises/{analysis_id}/conversas/{CONVERSATION_ID}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["conversation_id"] == str(CONVERSATION_ID)
+    assert [m["content"] for m in response.json()["messages"]] == [
+        "Quantas lojas o cliente tem?", "15 lojas."]
+
+    app.dependency_overrides[get_db] = lambda: ChatSession(results=[[]])
+    try:
+        missing = client.get(f"/analises/{analysis_id}/conversas/{CONVERSATION_ID}")
+    finally:
+        app.dependency_overrides.clear()
+    assert missing.status_code == 404
 
 
 def test_chat_answers_even_when_saving_the_turn_fails(monkeypatch):
@@ -464,17 +574,9 @@ def test_chat_answers_even_when_saving_the_turn_fails(monkeypatch):
     assert response.json()["answer"] == "São Paulo."
 
 
-def test_chat_history_endpoint_returns_the_conversation():
+def test_chat_history_endpoint_returns_the_latest_conversation():
     analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-    guardadas = [
-        SimpleNamespace(role="user", content="Quantas lojas?",
-                        grounded=None, fallback_reason=None,
-                        created_at=datetime(2026, 9, 9, 12, 0)),
-        SimpleNamespace(role="assistant", content="15 lojas.",
-                        grounded=True, fallback_reason=None,
-                        created_at=datetime(2026, 9, 9, 12, 0, 5)),
-    ]
-    app.dependency_overrides[get_db] = lambda: ChatSession(guardadas)
+    app.dependency_overrides[get_db] = lambda: ChatSession(results=[[_conversation()], _stored_turns()])
     try:
         response = client.get(f"/analises/{analysis_id}/chat")
     finally:
@@ -482,5 +584,18 @@ def test_chat_history_endpoint_returns_the_conversation():
 
     assert response.status_code == 200
     corpo = response.json()
-    assert [m["content"] for m in corpo["messages"]] == ["Quantas lojas?", "15 lojas."]
+    assert corpo["conversation_id"] == str(CONVERSATION_ID)
+    assert [m["content"] for m in corpo["messages"]] == ["Quantas lojas o cliente tem?", "15 lojas."]
     assert corpo["messages"][1]["grounded"] is True
+
+
+def test_chat_history_endpoint_is_empty_for_a_meeting_without_conversations():
+    analysis_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    app.dependency_overrides[get_db] = lambda: ChatSession(results=[[]])
+    try:
+        response = client.get(f"/analises/{analysis_id}/chat")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == {"analysis_id": str(analysis_id), "conversation_id": None, "messages": []}
