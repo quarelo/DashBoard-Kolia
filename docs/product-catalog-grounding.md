@@ -64,6 +64,27 @@ o dashboard sem checagem.
   `generate_embedding` (o mesmo client Ollama já usado pelo resto do
   serviço, não uma implementação paralela) e insere em `ai.products`. Uma
   falha em um produto não aborta o lote: é registrada e o loop continua.
+
+  **O vetor é de `content`, ou seja, `name` + a descrição inteira** — e o nome é
+  só **9%** desse texto (média medida: 27 contra 286 caracteres). Para o
+  grounding isso funciona, porque o que se compara é texto de reunião contra
+  texto de produto, prosa contra prosa. Para a **cobertura de gap pelo catálogo**
+  (`gap_coverage_service`, ver `docs/product-page-analytics.md`) isso atrapalha:
+  as descrições são marketing que se parece todo ("O aplicativo Meu X foi
+  desenvolvido especialmente para dar mobilidade às principais rotinas…") e
+  afogam o nome, que é a parte que diz o que o produto faz. Medido: para um gap
+  sobre visualizar carga e histórico de entrega, a busca contra `content` não
+  trouxe nenhum produto de entrega nos 12 primeiros, e a busca contra só o
+  **nome** trouxe os quatro de entrega do catálogo nas quatro primeiras posições.
+
+  **Consequência para quem for mexer:** `ai.products.embedding` é compartilhado
+  pelos dois consumidores. Trocá-lo por um vetor só do nome consertaria a
+  cobertura de gap e mudaria o comportamento do grounding, cujos limiares
+  (`product_grounding_confident_distance` / `plausible`) foram escolhidos para a
+  distância atual. Se a cobertura de gap precisar de vetor por nome, ela precisa
+  do **próprio** índice — em memória (302 vetores, ~1,8 MB, ~15 s para montar
+  depois de cada restart) ou numa coluna `name_embedding` por migration — e não
+  de uma troca do vetor existente.
 - `ia/scraper/main.py` — CLI (`python -m scraper.main`). É uma carga única,
   não um job de sincronização: não roda em agenda, não faz upsert, e recusa
   rodar de novo se `ai.products` já tiver linhas, a menos que `--force` seja

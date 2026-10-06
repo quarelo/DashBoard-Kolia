@@ -1133,3 +1133,58 @@ def test_embedding_progress_counts_passages_not_only_chunk_vectors():
         analysis, [por_passagem, legado])
 
     assert progresso["embedding_progress_percent"] == 100.0
+
+
+def test_declaring_no_motive_outranks_the_rules(monkeypatch):
+    """`motivos_churn: []` é uma resposta, não a falta de uma.
+
+    Era lido como `declarado or regras`, e um `[]` ficava indistinguível de um
+    resumo anterior ao schema com motivos. A reunião caía nas regras, que leem o
+    texto do fato CHURN — a própria frase em que o modelo nega o risco — e
+    somavam 50 + 30 + 25 = 105, capado em 100. Dez das 25 reuniões com churn 100
+    no banco eram isso, ocupando o Top 5 da dashboard.
+    """
+    monkeypatch.setattr(settings, "trust_declared_motives", True)
+    result = analysis_service.build_compact_final_summary([{
+        "pontos_chave": [
+            "CHURN: Não há menção de insatisfação, ameaça de cancelamento ou "
+            "comparação negativa com concorrentes no trecho analisado.",
+        ],
+        "motivos_churn": [],
+        "motivos_oportunidade": [],
+    }])
+
+    assert result["risco_churn"]["score"] == 0
+    assert result["risco_churn"]["justificativa"] == "Nenhum sinal explícito identificado."
+
+
+def test_summary_without_the_motive_key_still_falls_back_to_the_rules(monkeypatch):
+    """O fallback existe para resumos anteriores ao schema, e continua valendo.
+
+    Sem a chave não houve declaração nenhuma, e aí as regras são a única fonte.
+    """
+    monkeypatch.setattr(settings, "trust_declared_motives", True)
+    result = analysis_service.build_compact_final_summary([{
+        "pontos_chave": ["CHURN: o cliente disse que vai rescindir o contrato"],
+    }])
+
+    assert result["risco_churn"]["score"] == 50
+
+
+def test_enumerated_declaration_is_still_dropped_for_the_rules(monkeypatch):
+    """A declaração que cobre o catálogo inteiro segue descartada.
+
+    É enumeração, não escolha — e o `[]` que ela vira não pode ser confundido com
+    uma declaração vazia de verdade, senão o score cairia a zero em vez de ir para
+    as regras.
+    """
+    monkeypatch.setattr(settings, "trust_declared_motives", True)
+    result = analysis_service.build_compact_final_summary([{
+        "pontos_chave": ["CHURN: o cliente disse que vai rescindir o contrato"],
+        "motivos_churn": [
+            "AMEACA_CANCELAMENTO", "INSATISFACAO_EXPLICITA", "MENCAO_CONCORRENTE",
+            "RECLAMACAO_PRODUTO", "INATIVIDADE_PROLONGADA",
+        ],
+    }])
+
+    assert result["risco_churn"]["score"] == 50

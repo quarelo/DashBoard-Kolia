@@ -183,6 +183,110 @@ export interface ProductMeetings {
   elogios: ProductMeetingItem[];
 }
 
+/* ── Página de Produto (GET /api/dashboard/products/{nome}/insights) ─── */
+
+export interface ProductHealthMonth {
+  /** "YYYY-MM" — meses variam conforme os dados; nunca fixo. */
+  mes: string;
+  reunioes: number;
+  reclamacoes: number;
+  gaps: number;
+  elogios: number;
+}
+
+/**
+ * Quantos gaps deste produto caem em cada categoria de vocabulário. Conta
+ * **itens**, não reuniões — é o que dá material para um gráfico quando a
+ * mediana é de uma reunião detalhada por produto. A categoria
+ * "Não classificado" é parte do dado, não um erro: o tamanho dela é o aviso de
+ * que a taxonomia (85,2% de cobertura na carga medida) não pega tudo.
+ */
+export interface ProductGapNature {
+  categoria: string;
+  ocorrencias: number;
+}
+
+export interface ProductPersonaCount {
+  nome: string;
+  ocorrencias: number;
+}
+
+/**
+ * Mesma limitação de `ProductBreakdown`: só conta reunião que cita este
+ * produto sozinho — ver nota em `analysis_read.product_insights` (backend).
+ */
+export interface ProductInsights {
+  produto: string;
+  /**
+   * Toda reunião que cita o produto, inclusive junto com outros — a exceção à
+   * regra de produto único acima, e sempre `>= reunioesDetalhadas`. É o mesmo
+   * número de `ProductBreakdown.mencoes`, servido aqui para a Página de Produto
+   * não precisar carregar o `/executive` inteiro por um KPI.
+   */
+  mencoesTotais: number;
+  reunioesDetalhadas: number;
+  saudeMensal: ProductHealthMonth[];
+  naturezaGaps: ProductGapNature[];
+  personas: ProductPersonaCount[];
+}
+
+/* ── Perfil de qualidade (GET /api/dashboard/products/{nome}/quality) ── */
+
+export interface ProductQualityMetric {
+  chave: string;
+  rotulo: string;
+  valor: number;
+  mediaPortfolio: number;
+  /** De que lado está o bom: 10 pontos acima da média é ótimo em oportunidade
+   * e péssimo em risco de churn, e a barra divergente precisa saber disso. */
+  maiorEMelhor: boolean;
+}
+
+/**
+ * O produto em cinco métricas, cada uma contra a média do portfólio. A
+ * comparação é o ponto: com mediana de uma reunião detalhada por produto, um
+ * valor solto não diz nada e um desvio da média diz. Daí `reunioes` vir sempre
+ * — a tela precisa poder avisar quando o número sai de uma reunião só.
+ */
+export interface ProductQualityProfile {
+  produto: string;
+  reunioes: number;
+  reunioesPortfolio: number;
+  metricas: ProductQualityMetric[];
+}
+
+/* ── Gap × catálogo (GET /api/dashboard/products/{nome}/gap-coverage) ── */
+
+export type GapCoverageLevel = "provavel" | "possivel" | "sem_cobertura";
+
+export interface GapCoverageProduct {
+  nome: string;
+  url: string;
+  distancia: number;
+}
+
+export interface GapCoverageItem {
+  gap: string;
+  cobertura: GapCoverageLevel;
+  distancia: number | null;
+  margem: number | null;
+  /** Vazio quando `cobertura` é "sem_cobertura": a tela não deve mostrar
+   * palpite ao lado de um rótulo que diz que não há match. */
+  produtos: GapCoverageProduct[];
+}
+
+/**
+ * Quais gaps apontados neste produto já têm produto no catálogo TOTVS —
+ * cross-sell quando sim, pauta de roadmap quando não. Os rótulos são
+ * "provável" e "possível", nunca "coberto": o casamento é por vizinhança de
+ * embedding, e a faixa do meio acertou cerca de metade na amostra manual.
+ */
+export interface ProductGapCoverage {
+  produto: string;
+  itens: GapCoverageItem[];
+  resumo: Record<GapCoverageLevel, number>;
+}
+
 export interface ExecutiveDashboard {
   kpis: ExecutiveKpis;
   comparativoMensal: MonthlyComparison[];

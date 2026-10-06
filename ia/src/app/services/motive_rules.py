@@ -10,7 +10,8 @@ deterministic scoring layer.
 The LLM path is not gone: when a model that can classify is available, the codes
 it declares under the enum-constrained schema take precedence over these rules.
 
-Reading the rules: a motive fires when any TRIGGER matches and no BLOCKER does.
+Reading the rules: a motive fires when any TRIGGER matches in a clause where no
+BLOCKER and no ABSENCE match.
 Blockers exist because sales talk is full of hypotheticals — a prospect asking
 "e se não der certo?" is an objection to answer, not a customer leaving. Without
 that guard the four real transcripts in this dataset all scored churn, and every
@@ -37,6 +38,41 @@ HYPOTHETICAL = re.compile(
     r"\b(?:se n[ao]o|caso n[ao]o|e se\b|imagin[ae]|suponha|por exemplo|"
     r"vamos supor|potencial de|hipotes|digamos)\b"
 )
+
+# Dizer que um sinal ESTÁ AUSENTE não é o sinal. O modelo de análise escreve
+# exatamente isso sob a tag CHURN numa reunião tranquila, e "não há menção de
+# insatisfação, ameaça de cancelamento ou comparação com concorrentes" carrega as
+# três palavras mais caras do catálogo — as regras liam as três como presentes:
+# 50 + 30 + 25 = 105, capado em 100. Como estoura o teto, toda frase de negação
+# pousava em exatamente 100 e ocupava o topo do ranking: 10 das 25 reuniões com
+# churn 100 eram isso, e enchiam o Top 5 da dashboard.
+#
+# Por que não um "não" genérico: `não funciona`, `não vamos renovar` e `não
+# estamos satisfeitos` são gatilhos legítimos. A guarda tem que nomear a
+# ausência, então casa um verbo de existência negado ou um substantivo explícito
+# de "nenhum sinal". Medido sobre os 305 fatos CHURN distintos do banco, uma
+# forma mais larga que aceitasse `nenhum\w*` ou `não identificad\w*` soltos calou
+# três sinais reais — "insatisfação ... não utiliza nenhum sistema ERP" e
+# "lacunas de conhecimento não identificadas na proposta" —, e é por isso que os
+# dois exigem um substantivo de sinal depois.
+ABSENCE = re.compile(
+    r"\b(?:"
+    r"nao h[ao]\b|nao houve\b|nao havia\b|nao existe(?:m)?\b"
+    r"|nao (?:foi|foram|e) (?:mencionad|identificad|relatad|citad|apresentad|"
+    r"demonstrad|observad|detectad|registrad|constatad|verificad)\w*"
+    r"|nao (?:apresenta|apresentou|demonstra|demonstrou|indica|indicam|evidencia)\b"
+    r"|nenhum\w*\s+(?:mencao|sinal|sinais|indicio\w*|evidencia\w*|ameaca|intencao|"
+    r"risco|reclamacao|insatisfacao|queixa)"
+    r"|sem (?:mencao|sinais|sinal|indicio\w*|evidencia\w*|intencao|risco|ameaca)"
+    r"|ausencia de|baixa probabilidade|nada que indique"
+    r")"
+)
+
+# Cláusulas, não só frases: o modelo junta um sinal real a uma negação com uma
+# adversativa, e uma guarda do tamanho da frase jogaria os dois fora — "houve
+# desentendimento ... frustração e descontentamento futuro, mas não houve menção
+# explícita de cancelamento" é insatisfação 30, não insatisfação + ameaça 80.
+CLAUSE_SPLIT = re.compile(r"[.!?\n;]+|\b(?:mas|porem|contudo|entretanto|todavia)\b")
 
 CHURN_RULES: dict[str, dict] = {
     ChurnMotive.AMEACA_CANCELAMENTO.value: {
@@ -129,10 +165,15 @@ def _fires(sentence: str, rule: dict) -> bool:
 def _motives(text: str, rules: dict[str, dict], guard_hypothetical: bool) -> list[str]:
     """Codes whose rules fire somewhere in the text, in catalogue order."""
     found: list[str] = []
-    # Sentence-level so a blocker in one clause cannot mask a real signal elsewhere.
-    sentences = [s for s in re.split(r"[.!?\n]+", normalize(text)) if s.strip()]
+    # Cláusula a cláusula, para que um blocker numa delas não mascare um sinal real
+    # em outra.
+    sentences = [s for s in CLAUSE_SPLIT.split(normalize(text)) if s.strip()]
     for code, rule in rules.items():
         for sentence in sentences:
+            # A ausência vale acima de `survives_hypothetical`: "não há ameaça de
+            # cancelamento" é negação, não um compromisso condicional de sair.
+            if ABSENCE.search(sentence):
+                continue
             hypothetical = guard_hypothetical and HYPOTHETICAL.search(sentence)
             if hypothetical and not rule.get("survives_hypothetical"):
                 continue
@@ -148,5 +189,11 @@ def churn_motives(text: str) -> list[str]:
 
 
 def opportunity_motives(text: str) -> list[str]:
-    """A budget or deadline stated inside a hypothetical is still a real datum."""
+    """A budget or deadline stated inside a hypothetical is still a real datum.
+
+    A ausência, não: "não há menção de expansão de contrato ou novo módulo" não é
+    uma oportunidade, e a `ABSENCE` vale aqui também. Mede pouco deste lado — 1 de
+    856 fatos OPORTUNIDADE do banco —, porque o vocabulário de gatilho raramente se
+    repete numa frase de recusa, mas o mecanismo é o mesmo do churn.
+    """
     return _motives(text, OPPORTUNITY_RULES, guard_hypothetical=False)

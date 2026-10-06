@@ -5,9 +5,16 @@ import type {
   DashboardOverview,
   ExecutiveDashboard,
   FinalSummary,
+  GapCoverageItem,
+  GapCoverageLevel,
   Priority,
+  ProductGapCoverage,
+  ProductGapNature,
+  ProductInsights,
   ProductMeetingItem,
   ProductMeetings,
+  ProductQualityMetric,
+  ProductQualityProfile,
   SentimentClass,
 } from "../types";
 
@@ -75,6 +82,47 @@ interface RawProductMeetingItem {
   uf: string | null;
   segmento: string | null;
   itens: string[];
+}
+
+interface RawHealthBucket {
+  reunioes: number;
+  reclamacoes: number;
+  gaps: number;
+  elogios: number;
+}
+
+interface RawProductInsights {
+  produto: string;
+  mencoes_totais: number;
+  reunioes_detalhadas: number;
+  saude_mensal: ({ mes: string } & RawHealthBucket)[];
+  natureza_gaps: { categoria: string; ocorrencias: number }[];
+  personas: { nome: string; ocorrencias: number }[];
+}
+
+interface RawProductQualityProfile {
+  produto: string;
+  reunioes: number;
+  reunioes_portfolio: number;
+  metricas: {
+    chave: string;
+    rotulo: string;
+    valor: number;
+    media_portfolio: number;
+    maior_e_melhor: boolean;
+  }[];
+}
+
+interface RawGapCoverage {
+  produto: string;
+  itens: {
+    gap: string;
+    cobertura: GapCoverageLevel;
+    distancia: number | null;
+    margem: number | null;
+    produtos: { nome: string; url: string; distancia: number }[];
+  }[];
+  resumo: Record<string, number>;
 }
 
 interface RawProductMeetings {
@@ -149,6 +197,54 @@ function toProductMeetingItem(raw: RawProductMeetingItem): ProductMeetingItem {
   };
 }
 
+function toProductInsights(raw: RawProductInsights): ProductInsights {
+  return {
+    produto: raw.produto,
+    mencoesTotais: raw.mencoes_totais ?? 0,
+    reunioesDetalhadas: raw.reunioes_detalhadas,
+    saudeMensal: (raw.saude_mensal ?? []).map((m) => ({
+      mes: m.mes, reunioes: m.reunioes, reclamacoes: m.reclamacoes, gaps: m.gaps, elogios: m.elogios,
+    })),
+    naturezaGaps: (raw.natureza_gaps ?? []).map((n): ProductGapNature => (
+      { categoria: n.categoria, ocorrencias: n.ocorrencias }
+    )),
+    personas: (raw.personas ?? []).map((p) => ({ nome: p.nome, ocorrencias: p.ocorrencias })),
+  };
+}
+
+function toQualityProfile(raw: RawProductQualityProfile): ProductQualityProfile {
+  return {
+    produto: raw.produto,
+    reunioes: raw.reunioes,
+    reunioesPortfolio: raw.reunioes_portfolio,
+    metricas: (raw.metricas ?? []).map((m): ProductQualityMetric => ({
+      chave: m.chave,
+      rotulo: m.rotulo,
+      valor: m.valor,
+      mediaPortfolio: m.media_portfolio,
+      maiorEMelhor: m.maior_e_melhor,
+    })),
+  };
+}
+
+const EMPTY_COVERAGE: Record<GapCoverageLevel, number> = {
+  provavel: 0, possivel: 0, sem_cobertura: 0,
+};
+
+function toGapCoverage(raw: RawGapCoverage): ProductGapCoverage {
+  return {
+    produto: raw.produto,
+    itens: (raw.itens ?? []).map((i): GapCoverageItem => ({
+      gap: i.gap,
+      cobertura: i.cobertura,
+      distancia: i.distancia ?? null,
+      margem: i.margem ?? null,
+      produtos: (i.produtos ?? []).map((p) => ({ nome: p.nome, url: p.url, distancia: p.distancia })),
+    })),
+    resumo: { ...EMPTY_COVERAGE, ...(raw.resumo ?? {}) },
+  };
+}
+
 function toRankedMeeting(raw: RawRankedMeeting) {
   return {
     analysisId: raw.analysis_id,
@@ -206,6 +302,35 @@ export const dashboardService = {
       gaps: (raw.gaps ?? []).map(toProductMeetingItem),
       elogios: (raw.elogios ?? []).map(toProductMeetingItem),
     };
+  },
+
+  /** Saúde mensal, natureza dos gaps e personas — a Página de Produto. */
+  async productInsights(nome: string): Promise<ProductInsights> {
+    const raw = await apiRequest<RawProductInsights>(
+      `/api/dashboard/products/${encodeURIComponent(nome)}/insights`,
+    );
+    return toProductInsights(raw);
+  },
+
+  /** As cinco métricas de qualidade do produto contra a média do portfólio. */
+  async productQuality(nome: string): Promise<ProductQualityProfile> {
+    const raw = await apiRequest<RawProductQualityProfile>(
+      `/api/dashboard/products/${encodeURIComponent(nome)}/quality`,
+    );
+    return toQualityProfile(raw);
+  },
+
+  /**
+   * Quais gaps deste produto já têm produto no catálogo TOTVS. Passa pela IA
+   * (embedding + busca vetorial), então é a chamada mais lenta da página: ~0,3s
+   * com os gaps já em cache e vários segundos na primeira vez de cada produto,
+   * quando o Ollama ainda tem de embeddar cada texto.
+   */
+  async productGapCoverage(nome: string): Promise<ProductGapCoverage> {
+    const raw = await apiRequest<RawGapCoverage>(
+      `/api/dashboard/products/${encodeURIComponent(nome)}/gap-coverage`,
+    );
+    return toGapCoverage(raw);
   },
 
   async overview(): Promise<DashboardOverview> {

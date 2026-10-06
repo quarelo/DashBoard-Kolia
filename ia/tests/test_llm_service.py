@@ -14,6 +14,7 @@ from src.app.services.llm_service import (
     generate_chunk_summary,
     generate_chat_answer,
     generate_embedding,
+    generate_embeddings,
     product_classification_schema,
 )
 
@@ -232,16 +233,75 @@ def test_consolidate_summaries_uses_its_own_thinking_budget(monkeypatch):
 def test_generate_embedding_uses_configured_model(monkeypatch):
     monkeypatch.setattr(settings, "embedding_model", "embed-do-env")
     monkeypatch.setattr(settings, "embedding_dim", 3)
+    monkeypatch.setattr(settings, "ollama_keep_alive", "30m")
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/embed"
+        # `input` é lista mesmo para um texto só: a função de um texto está em
+        # cima da de vários, para não haver duas implementações da validação.
         assert json.loads(request.content) == {
             "model": "embed-do-env",
-            "input": "conteúdo",
+            "input": ["conteúdo"],
+            "keep_alive": "30m",
         }
         return httpx.Response(200, json={"embeddings": [[0.1, 0.2, 0.3]]})
 
     assert generate_embedding("conteúdo", client=client_for(handler)) == [0.1, 0.2, 0.3]
+
+
+def test_generate_embedding_sends_keep_alive(monkeypatch):
+    """A chamada de embedding tem de pedir o mesmo `keep_alive` das chamadas de
+    geração. Sem isso o Ollama aplicava o padrão dele, de 5 minutos, enquanto o
+    modelo de geração ficava com os 30 configurados — e como só um modelo fica
+    residente de cada vez, recarregar o de embedding custava ~5 s na primeira
+    abertura da Página de Produto, contra ~17 ms com ele na memória."""
+    monkeypatch.setattr(settings, "embedding_dim", 2)
+    monkeypatch.setattr(settings, "ollama_keep_alive", "45m")
+    enviado = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        enviado.update(json.loads(request.content))
+        return httpx.Response(200, json={"embeddings": [[0.1, 0.2]]})
+
+    generate_embedding("conteúdo", client=client_for(handler))
+
+    assert enviado["keep_alive"] == "45m"
+
+
+def test_generate_embeddings_sends_one_request_for_many_texts(monkeypatch):
+    """O ganho é no número de idas e voltas: medido, 20 gaps custaram 400 ms em
+    20 chamadas e 147 ms numa só."""
+    monkeypatch.setattr(settings, "embedding_dim", 2)
+    chamadas = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        chamadas.append(json.loads(request.content)["input"])
+        return httpx.Response(200, json={"embeddings": [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]})
+
+    out = generate_embeddings(["a", "b", "c"], client=client_for(handler))
+
+    assert chamadas == [["a", "b", "c"]], "deveria ser uma chamada só"
+    assert out == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+
+
+def test_generate_embeddings_rejects_count_mismatch(monkeypatch):
+    """Se o Ollama devolver menos vetores que textos, a correspondência por
+    posição estaria errada — e um gap receberia o vetor de outro, o que viraria
+    sugestão de produto errada em silêncio."""
+    monkeypatch.setattr(settings, "embedding_dim", 2)
+    client = client_for(
+        lambda _request: httpx.Response(200, json={"embeddings": [[0.1, 0.2]]})
+    )
+
+    with pytest.raises(OllamaResponseError):
+        generate_embeddings(["a", "b"], client=client)
+
+
+def test_generate_embeddings_empty_list_never_calls_ollama():
+    def fail_if_called(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("não deveria chamar o Ollama sem texto")
+
+    assert generate_embeddings([], client=client_for(fail_if_called)) == []
 
 
 def test_generate_chat_answer_uses_one_short_non_thinking_request(monkeypatch):

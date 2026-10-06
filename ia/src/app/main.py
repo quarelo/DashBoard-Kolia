@@ -1,4 +1,5 @@
 import logging
+import threading
 from contextlib import asynccontextmanager
 from uuid import UUID
 
@@ -13,13 +14,14 @@ from src.app.models.analysis import MeetingAnalysis, MeetingChunk
 from src.app.schemas.analysis import (
     AnalysisDetailResponse, AnalyzeRequest, AnalyzeResponse, ChunkResponse,
     SemanticSearchRequest, SemanticSearchResponse,
-    CategoryEvidenceResponse,
+    CategoryEvidenceResponse, GapCoverageRequest, GapCoverageResponse,
     ChatRequest, ChatResponse, ChatHistoryResponse,
     ChatConversationListResponse, ChatConversationResponse,
 )
 from src.app.services.analysis_service import build_analysis_progress, prepare_analysis
+from src.app.services.gap_coverage_service import match_gaps
 from src.app.services.llm_service import (
-    OllamaError, complete_missing_fields, missing_fields,
+    OllamaError, complete_missing_fields, generate_embedding, missing_fields,
 )
 from src.app.services.analysis_worker import AnalysisWorker
 from src.app.services.analysis_submission import SubmissionConflict, submit_idempotent
@@ -49,6 +51,7 @@ async def lifespan(_app: FastAPI):
     init_database()
     analysis_worker.start()
     analysis_worker.recover()
+    threading.Thread(target=_warm_embedding_model, name="embedding-warmup", daemon=True).start()
     try:
         yield
     finally:
@@ -57,6 +60,28 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="KOLIA IA Service", version="0.1.0", lifespan=lifespan)
 logger = logging.getLogger("uvicorn.error")
+
+
+def _warm_embedding_model() -> None:
+    """Carrega o modelo de embedding no Ollama já no startup.
+
+    Carregar custa ~5 s contra ~17 ms de uma chamada com o modelo residente, e
+    quem pagava esses 5 s era a primeira abertura da Página de Produto depois de
+    cada restart. Uma chamada de embedding aqui transfere esse custo para a
+    subida do serviço, onde ninguém está esperando.
+
+    Roda em thread, não inline: senão o `lifespan` atrasaria 5 s e o
+    healthcheck do Compose veria o serviço fora do ar nesse tempo. Falha é só
+    log — sem o Ollama de pé o serviço tem de subir igual, porque as rotas que
+    não dependem de modelo continuam servindo, e o chat e a análise já
+    respondem o próprio erro.
+    """
+    try:
+        generate_embedding("aquecimento do modelo de embedding")
+    except Exception as error:  # noqa: BLE001 - aquecer é best-effort
+        logger.warning("embedding_warmup_falhou erro=%s", error)
+    else:
+        logger.info("embedding_warmup_ok modelo=%s", settings.embedding_model)
 
 
 @app.get("/")
@@ -236,6 +261,31 @@ def category_evidence(
         raise HTTPException(status_code=404, detail=str(error)) from error
     except RagNotReadyError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post(
+    "/produtos/gaps-catalogo",
+    response_model=GapCoverageResponse,
+    dependencies=[Depends(verify_token)],
+)
+def gap_catalogue_coverage(
+    payload: GapCoverageRequest,
+    db: Session = Depends(get_db),
+):
+    """Quais dos gaps recebidos já têm produto no catálogo TOTVS.
+
+    Não é por análise: recebe os textos de gap que o backend já recortou para um
+    produto (o recorte depende de `core.meetings`, fora deste serviço) e
+    responde pelo catálogo. Critério, calibração e por que "provável" em vez de
+    "coberto": `services/gap_coverage_service.py`.
+    """
+    try:
+        return match_gaps(db, payload.gaps, suggestions=payload.suggestions)
+    except OllamaError as error:
+        # Embeddar é a única dependência externa daqui; sem o Ollama a resposta
+        # honesta é 503, não uma cobertura vazia que a tela leria como "nenhum
+        # gap tem produto".
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 def _message_out(message) -> dict:

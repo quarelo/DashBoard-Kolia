@@ -87,6 +87,96 @@ def dashboard_product_meetings(
     )
 
 
+@router.get("/products/{nome}/insights")
+def dashboard_product_insights(
+    nome: str,
+    uf: str | None = Query(None, description="Filtra por UF (estado), ex: SP, RJ."),
+    segmento: str | None = Query(None, description="Filtra por NOME_SEGMENTO (contém, case-insensitive)."),
+    unidade: str | None = Query(None, description="Filtra por NOME_UNIDADE (contém, case-insensitive)."),
+    formato: str | None = Query(None, description="Filtra por FORMATO_MEETING, ex: Vídeo, Presencial."),
+    cnae: str | None = Query(None, description="Filtra por CNAE (exato)."),
+    dt_meeting_from: str | None = Query(None, description="Data da reunião a partir de (YYYY-MM-DD)."),
+    dt_meeting_to: str | None = Query(None, description="Data da reunião até (YYYY-MM-DD)."),
+    _user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Saúde mensal, segmentação (UF/segmento/CNAE) e personas de um produto —
+    para a Página de Produto. Contrato em docs/product-page-analytics.md."""
+    return analysis_read.product_insights(
+        db, nome, uf=uf, segmento=segmento, unidade=unidade, formato=formato,
+        cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+    )
+
+
+@router.get("/products/{nome}/quality")
+def dashboard_product_quality(
+    nome: str,
+    uf: str | None = Query(None, description="Filtra por UF (estado), ex: SP, RJ."),
+    segmento: str | None = Query(None, description="Filtra por NOME_SEGMENTO (contém, case-insensitive)."),
+    unidade: str | None = Query(None, description="Filtra por NOME_UNIDADE (contém, case-insensitive)."),
+    formato: str | None = Query(None, description="Filtra por FORMATO_MEETING, ex: Vídeo, Presencial."),
+    cnae: str | None = Query(None, description="Filtra por CNAE (exato)."),
+    dt_meeting_from: str | None = Query(None, description="Data da reunião a partir de (YYYY-MM-DD)."),
+    dt_meeting_to: str | None = Query(None, description="Data da reunião até (YYYY-MM-DD)."),
+    _user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """O produto em cinco métricas de qualidade, cada uma contra a média do
+    portfólio — a leitura que funciona mesmo com uma reunião só."""
+    return analysis_read.product_quality_profile(
+        db, nome, uf=uf, segmento=segmento, unidade=unidade, formato=formato,
+        cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+    )
+
+
+@router.get("/products/{nome}/gap-coverage")
+def dashboard_product_gap_coverage(
+    nome: str,
+    uf: str | None = Query(None, description="Filtra por UF (estado), ex: SP, RJ."),
+    segmento: str | None = Query(None, description="Filtra por NOME_SEGMENTO (contém, case-insensitive)."),
+    unidade: str | None = Query(None, description="Filtra por NOME_UNIDADE (contém, case-insensitive)."),
+    formato: str | None = Query(None, description="Filtra por FORMATO_MEETING, ex: Vídeo, Presencial."),
+    cnae: str | None = Query(None, description="Filtra por CNAE (exato)."),
+    dt_meeting_from: str | None = Query(None, description="Data da reunião a partir de (YYYY-MM-DD)."),
+    dt_meeting_to: str | None = Query(None, description="Data da reunião até (YYYY-MM-DD)."),
+    _user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    client: httpx.Client = Depends(get_ia_client),
+):
+    """Quais gaps deste produto já têm produto no catálogo TOTVS.
+
+    O recorte é daqui (depende de ``core.meetings``), o casamento é da IA
+    (depende de embedding e de ``ai.products``). Sem gap nenhum a resposta é
+    vazia sem chamar a IA — não há o que casar, e a chamada custaria embedding.
+    """
+    gaps = analysis_read.product_gap_texts(
+        db, nome, uf=uf, segmento=segmento, unidade=unidade, formato=formato,
+        cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+    )
+    if not gaps:
+        return {"produto": nome, "itens": [], "resumo": {"provavel": 0, "possivel": 0, "sem_cobertura": 0}}
+
+    try:
+        # Embeddar um gap custa ~52ms com o modelo quente e ~9s a frio (carga do
+        # modelo), e um produto chega a 22 gaps: o timeout padrão de 30s do
+        # cliente da IA não cobre a primeira abertura com o Ollama frio.
+        response = client.post(
+            "/produtos/gaps-catalogo", json={"gaps": gaps, "suggestions": 2},
+            timeout=httpx.Timeout(120.0, connect=5.0),
+        )
+    except httpx.HTTPError as error:
+        raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "Serviço de IA indisponível."}) from error
+
+    if response.status_code in (401, 403):
+        raise HTTPException(502, {"code": "IA_AUTH_FAILED", "message": "A IA recusou a autenticação do backend."})
+    if response.status_code >= 500:
+        raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "A IA não respondeu. Tente novamente."})
+    if response.status_code != 200:
+        raise HTTPException(502, {"code": "IA_BAD_RESPONSE", "message": "A IA não casou os gaps com o catálogo."})
+
+    return {"produto": nome, **response.json()}
+
+
 @router.get("/meetings")
 def dashboard_meetings(
     offset: int = Query(0, ge=0),

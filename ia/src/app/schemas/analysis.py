@@ -85,6 +85,32 @@ class SemanticSearchResponse(BaseModel):
     results: list[SemanticSearchResult]
 
 
+class GapCoverageRequest(BaseModel):
+    # O recorte de quais gaps são de qual produto depende de `core.meetings`,
+    # que este serviço não lê, então o backend manda a lista já filtrada.
+    gaps: list[str] = Field(min_length=1, max_length=200)
+    suggestions: int = Field(default=2, ge=1, le=5)
+
+
+class GapCoverageProduct(BaseModel):
+    nome: str
+    url: str
+    distancia: float
+
+
+class GapCoverageItem(BaseModel):
+    gap: str
+    cobertura: Literal["provavel", "possivel", "sem_cobertura"]
+    distancia: float | None = None
+    margem: float | None = None
+    produtos: list[GapCoverageProduct] = []
+
+
+class GapCoverageResponse(BaseModel):
+    itens: list[GapCoverageItem]
+    resumo: dict[str, int]
+
+
 class CategoryEvidenceResponse(BaseModel):
     analysis_id: UUID
     ready: bool

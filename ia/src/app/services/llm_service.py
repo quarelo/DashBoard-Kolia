@@ -908,26 +908,61 @@ CONTEÚDO DA REUNIÃO:
     return seen
 
 
-def generate_embedding(
-    text: str, *, client: httpx.Client | None = None
-) -> list[float]:
+def generate_embeddings(
+    texts: list[str], *, client: httpx.Client | None = None
+) -> list[list[float]]:
+    """Embedda vários textos numa chamada só, na ordem em que vieram.
+
+    O `/api/embed` do Ollama aceita `input` como lista, e usar isso importa:
+    medido com 20 gaps, 20 chamadas separadas custaram 400 ms e uma chamada com
+    os 20 textos custou 147 ms — 2,7x, porque o que pesa é o ida-e-volta por
+    chamada, não o cálculo do vetor.
+
+    `keep_alive` vai no corpo como em toda chamada de geração. Sem ele o Ollama
+    aplicava o padrão de 5 minutos no modelo de embedding enquanto o de geração
+    ficava com os 30 minutos configurados (verificado: `ollama ps` mostrava
+    `nomic-embed-text` com 4 minutos e `qwen3.5` com 29). Recarregar o modelo de
+    embedding custa ~5 s contra 17 ms de uma chamada com ele residente, e era
+    isso que fazia a Página de Produto demorar "às vezes".
+    """
+    if not texts:
+        return []
     data = _post_json(
         settings.ollama_embed_url,
-        {"model": settings.embedding_model, "input": text},
+        {
+            "model": settings.embedding_model,
+            "input": texts,
+            "keep_alive": settings.ollama_keep_alive,
+        },
         client=client,
         timeout=settings.ollama_embedding_timeout_seconds,
     )
     embeddings = data.get("embeddings")
-    if not isinstance(embeddings, list) or not embeddings or not isinstance(embeddings[0], list):
-        raise OllamaResponseError("O Ollama não retornou uma lista de embeddings.")
-    embedding = embeddings[0]
-    if len(embedding) != settings.embedding_dim:
+    if not isinstance(embeddings, list) or len(embeddings) != len(texts):
         raise OllamaResponseError(
-            f"Embedding retornou {len(embedding)} dimensões; esperado {settings.embedding_dim}."
+            f"O Ollama retornou {len(embeddings) if isinstance(embeddings, list) else 'nenhuma'} "
+            f"embedding(s) para {len(texts)} texto(s)."
         )
-    if not all(isinstance(value, (int, float)) for value in embedding):
-        raise OllamaResponseError("O embedding retornado contém valores não numéricos.")
-    return [float(value) for value in embedding]
+    result: list[list[float]] = []
+    for embedding in embeddings:
+        if not isinstance(embedding, list):
+            raise OllamaResponseError("O Ollama não retornou uma lista de embeddings.")
+        if len(embedding) != settings.embedding_dim:
+            raise OllamaResponseError(
+                f"Embedding retornou {len(embedding)} dimensões; esperado {settings.embedding_dim}."
+            )
+        if not all(isinstance(value, (int, float)) for value in embedding):
+            raise OllamaResponseError("O embedding retornado contém valores não numéricos.")
+        result.append([float(value) for value in embedding])
+    return result
+
+
+def generate_embedding(
+    text: str, *, client: httpx.Client | None = None
+) -> list[float]:
+    """Um texto. Fica sobre :func:`generate_embeddings` para não existirem duas
+    implementações da mesma validação."""
+    return generate_embeddings([text], client=client)[0]
 
 
 def generate_chat_answer(

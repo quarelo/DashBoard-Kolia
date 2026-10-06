@@ -15,8 +15,12 @@ import {
 } from "../services/dashboardService";
 import { useAsync } from "../lib/useAsync";
 import { PageError, PageLoader } from "../components/ui/PageState";
+import { ProductMeetingGroup } from "../components/products/ProductMeetingGroup";
+import { MODAL_SCROLL, Modal } from "../components/ui/Modal";
+import { LegendDot } from "../components/ui/LegendDot";
+import { EmptyChart } from "../components/ui/EmptyChart";
 import type {
-  ExecutiveDashboard, MonthlyComparison, ProductBreakdown, ProductMeetingItem,
+  ExecutiveDashboard, MonthlyComparison, ProductBreakdown,
   RankedMeeting, SegmentRiskOpportunity, ThemeRanking, UfRisk,
 } from "../types";
 
@@ -295,15 +299,6 @@ function ProductBar({ product, maxMentions, onSelect }: {
   );
 }
 
-function LegendDot({ color, label }: { color: string; label: string }) {
-  return (
-    <span className="flex items-center gap-1.5">
-      <span className={`w-2 h-2 rounded-full ${color}`} />
-      {label}
-    </span>
-  );
-}
-
 /** Reuniões por trás dos números de um produto, agrupadas por reclamação/gap/
  * elogio — aberto ao clicar numa barra do Gráfico de Produto. */
 function ProductMeetingsModal({ nome, onClose }: { nome: string; onClose: () => void }) {
@@ -311,108 +306,58 @@ function ProductMeetingsModal({ nome, onClose }: { nome: string; onClose: () => 
   const navigate = useNavigate();
 
   return (
-    <>
-      <div className="fixed inset-0 bg-black/25 backdrop-blur-[2px] z-40 animate-fade-in" onClick={onClose} />
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="product-meetings-title"
-          className="pointer-events-auto w-full max-w-2xl max-h-[85vh] flex flex-col bg-white border border-gray-200 rounded-2xl shadow-2xl"
-        >
-          <div className="flex items-start justify-between gap-3 p-5 border-b border-surface-border flex-shrink-0">
-            <div className="min-w-0">
-              <h2 id="product-meetings-title" className="text-base font-bold text-ink truncate">{nome}</h2>
-              <p className="text-xs text-ink-secondary mt-0.5">
-                Reuniões que sustentam as reclamações, gaps e elogios deste produto
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={onClose}
-              className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-surface transition-colors flex-shrink-0"
-            >
-              <X size={16} />
-            </button>
+    <Modal onClose={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="product-meetings-title"
+        className="w-full max-w-2xl max-h-[85vh] flex flex-col bg-white border border-gray-200 rounded-2xl shadow-2xl"
+      >
+        <div className="flex items-start justify-between gap-3 p-5 border-b border-surface-border flex-shrink-0">
+          <div className="min-w-0">
+            <h2 id="product-meetings-title" className="text-base font-bold text-ink truncate">{nome}</h2>
+            <p className="text-xs text-ink-secondary mt-0.5">
+              Reuniões que sustentam as reclamações, gaps e elogios deste produto
+            </p>
           </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-surface transition-colors flex-shrink-0"
+          >
+            <X size={16} />
+          </button>
+        </div>
 
-          <div className="overflow-y-auto p-5 space-y-5">
-            {loading ? (
-              <div className="h-32 flex items-center justify-center gap-2 text-xs text-ink-muted">
-                <Loader2 size={14} className="animate-spin" /> Carregando reuniões...
-              </div>
-            ) : error || !data ? (
-              <p className="text-xs text-ink-secondary py-6 text-center">{error ?? "Não foi possível carregar as reuniões."}</p>
-            ) : (
-              <>
-                <ProductMeetingGroup
-                  label="Reclamações" color="text-rose-600" dot="bg-rose-500"
-                  items={data.reclamacoes} onOpen={(id) => navigate(`/app/meetings/${id}`)}
-                  emptyLabel="Nenhuma reclamação registrada para este produto."
-                />
-                <ProductMeetingGroup
-                  label="Gaps" color="text-amber-600" dot="bg-amber-400"
-                  items={data.gaps} onOpen={(id) => navigate(`/app/meetings/${id}`)}
-                  emptyLabel="Nenhum gap registrado para este produto."
-                />
-                <ProductMeetingGroup
-                  label="Elogios" color="text-emerald-600" dot="bg-emerald-500"
-                  items={data.elogios} onOpen={(id) => navigate(`/app/meetings/${id}`)}
-                  emptyLabel="Nenhum elogio registrado para este produto."
-                />
-              </>
-            )}
-          </div>
+        <div className={`${MODAL_SCROLL} p-5 space-y-5`}>
+          {loading ? (
+            <div className="h-32 flex items-center justify-center gap-2 text-xs text-ink-muted">
+              <Loader2 size={14} className="animate-spin" /> Carregando reuniões...
+            </div>
+          ) : error || !data ? (
+            <p className="text-xs text-ink-secondary py-6 text-center">{error ?? "Não foi possível carregar as reuniões."}</p>
+          ) : (
+            <>
+              <ProductMeetingGroup
+                label="Reclamações" color="text-rose-600" dot="bg-rose-500"
+                items={data.reclamacoes} onOpen={(id) => navigate(`/app/meetings/${id}`)}
+                emptyLabel="Nenhuma reclamação registrada para este produto."
+              />
+              <ProductMeetingGroup
+                label="Gaps" color="text-amber-600" dot="bg-amber-400"
+                items={data.gaps} onOpen={(id) => navigate(`/app/meetings/${id}`)}
+                emptyLabel="Nenhum gap registrado para este produto."
+              />
+              <ProductMeetingGroup
+                label="Elogios" color="text-emerald-600" dot="bg-emerald-500"
+                items={data.elogios} onOpen={(id) => navigate(`/app/meetings/${id}`)}
+                emptyLabel="Nenhum elogio registrado para este produto."
+              />
+            </>
+          )}
         </div>
       </div>
-    </>
-  );
-}
-
-function ProductMeetingGroup({ label, color, dot, items, onOpen, emptyLabel }: {
-  label: string;
-  color: string;
-  dot: string;
-  items: ProductMeetingItem[];
-  onOpen: (analysisId: string) => void;
-  emptyLabel: string;
-}) {
-  return (
-    <div>
-      <h3 className={`text-xs font-bold uppercase tracking-wide flex items-center gap-1.5 mb-2 ${color}`}>
-        <span className={`w-2 h-2 rounded-full ${dot}`} />
-        {label} ({items.length})
-      </h3>
-      {items.length === 0 ? (
-        <p className="text-xs text-ink-muted">{emptyLabel}</p>
-      ) : (
-        <div className="space-y-2">
-          {items.map((item) => (
-            <div
-              key={item.analysisId}
-              onClick={() => onOpen(item.analysisId)}
-              className="px-3 py-2 rounded-lg border border-surface-border hover:bg-surface cursor-pointer transition-colors"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold text-ink truncate">
-                  Reunião {item.externalMeetingId}
-                  {(item.uf || item.segmento) && (
-                    <span className="text-ink-secondary font-normal">
-                      {" "}({[item.uf, item.segmento].filter(Boolean).join(" · ")})
-                    </span>
-                  )}
-                </p>
-              </div>
-              <ul className="mt-1 space-y-0.5">
-                {item.itens.map((texto, i) => (
-                  <li key={i} className="text-xs text-ink-secondary line-clamp-2">• {texto}</li>
-                ))}
-              </ul>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+    </Modal>
   );
 }
 
@@ -692,12 +637,3 @@ function RankedMeetingsSection({
   );
 }
 
-/* ── shared ────────────────────────────────────────────────────────────── */
-
-function EmptyChart({ label }: { label: string }) {
-  return (
-    <div className="h-[120px] flex items-center justify-center text-xs text-ink-muted text-center px-4">
-      {label}
-    </div>
-  );
-}
