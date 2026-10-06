@@ -16,6 +16,7 @@ import {
 import { useAsync } from "../lib/useAsync";
 import { PageError, PageLoader } from "../components/ui/PageState";
 import { ProductMeetingGroup } from "../components/products/ProductMeetingGroup";
+import { MODAL_SCROLL, Modal } from "../components/ui/Modal";
 import { LegendDot } from "../components/ui/LegendDot";
 import { EmptyChart } from "../components/ui/EmptyChart";
 import type {
@@ -305,61 +306,58 @@ function ProductMeetingsModal({ nome, onClose }: { nome: string; onClose: () => 
   const navigate = useNavigate();
 
   return (
-    <>
-      <div className="fixed inset-0 bg-black/25 backdrop-blur-[2px] z-40 animate-fade-in" onClick={onClose} />
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="product-meetings-title"
-          className="pointer-events-auto w-full max-w-2xl max-h-[85vh] flex flex-col bg-white border border-gray-200 rounded-2xl shadow-2xl"
-        >
-          <div className="flex items-start justify-between gap-3 p-5 border-b border-surface-border flex-shrink-0">
-            <div className="min-w-0">
-              <h2 id="product-meetings-title" className="text-base font-bold text-ink truncate">{nome}</h2>
-              <p className="text-xs text-ink-secondary mt-0.5">
-                Reuniões que sustentam as reclamações, gaps e elogios deste produto
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={onClose}
-              className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-surface transition-colors flex-shrink-0"
-            >
-              <X size={16} />
-            </button>
+    <Modal onClose={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="product-meetings-title"
+        className="w-full max-w-2xl max-h-[85vh] flex flex-col bg-white border border-gray-200 rounded-2xl shadow-2xl"
+      >
+        <div className="flex items-start justify-between gap-3 p-5 border-b border-surface-border flex-shrink-0">
+          <div className="min-w-0">
+            <h2 id="product-meetings-title" className="text-base font-bold text-ink truncate">{nome}</h2>
+            <p className="text-xs text-ink-secondary mt-0.5">
+              Reuniões que sustentam as reclamações, gaps e elogios deste produto
+            </p>
           </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-surface transition-colors flex-shrink-0"
+          >
+            <X size={16} />
+          </button>
+        </div>
 
-          <div className="overflow-y-auto p-5 space-y-5">
-            {loading ? (
-              <div className="h-32 flex items-center justify-center gap-2 text-xs text-ink-muted">
-                <Loader2 size={14} className="animate-spin" /> Carregando reuniões...
-              </div>
-            ) : error || !data ? (
-              <p className="text-xs text-ink-secondary py-6 text-center">{error ?? "Não foi possível carregar as reuniões."}</p>
-            ) : (
-              <>
-                <ProductMeetingGroup
-                  label="Reclamações" color="text-rose-600" dot="bg-rose-500"
-                  items={data.reclamacoes} onOpen={(id) => navigate(`/app/meetings/${id}`)}
-                  emptyLabel="Nenhuma reclamação registrada para este produto."
-                />
-                <ProductMeetingGroup
-                  label="Gaps" color="text-amber-600" dot="bg-amber-400"
-                  items={data.gaps} onOpen={(id) => navigate(`/app/meetings/${id}`)}
-                  emptyLabel="Nenhum gap registrado para este produto."
-                />
-                <ProductMeetingGroup
-                  label="Elogios" color="text-emerald-600" dot="bg-emerald-500"
-                  items={data.elogios} onOpen={(id) => navigate(`/app/meetings/${id}`)}
-                  emptyLabel="Nenhum elogio registrado para este produto."
-                />
-              </>
-            )}
-          </div>
+        <div className={`${MODAL_SCROLL} p-5 space-y-5`}>
+          {loading ? (
+            <div className="h-32 flex items-center justify-center gap-2 text-xs text-ink-muted">
+              <Loader2 size={14} className="animate-spin" /> Carregando reuniões...
+            </div>
+          ) : error || !data ? (
+            <p className="text-xs text-ink-secondary py-6 text-center">{error ?? "Não foi possível carregar as reuniões."}</p>
+          ) : (
+            <>
+              <ProductMeetingGroup
+                label="Reclamações" color="text-rose-600" dot="bg-rose-500"
+                items={data.reclamacoes} onOpen={(id) => navigate(`/app/meetings/${id}`)}
+                emptyLabel="Nenhuma reclamação registrada para este produto."
+              />
+              <ProductMeetingGroup
+                label="Gaps" color="text-amber-600" dot="bg-amber-400"
+                items={data.gaps} onOpen={(id) => navigate(`/app/meetings/${id}`)}
+                emptyLabel="Nenhum gap registrado para este produto."
+              />
+              <ProductMeetingGroup
+                label="Elogios" color="text-emerald-600" dot="bg-emerald-500"
+                items={data.elogios} onOpen={(id) => navigate(`/app/meetings/${id}`)}
+                emptyLabel="Nenhum elogio registrado para este produto."
+              />
+            </>
+          )}
         </div>
       </div>
-    </>
+    </Modal>
   );
 }
 

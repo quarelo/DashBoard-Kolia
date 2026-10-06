@@ -24,7 +24,13 @@ export function ProductMeetingGroup({ label, color, dot, items, onOpen, emptyLab
             <div
               key={item.analysisId}
               onClick={() => onOpen(item.analysisId)}
-              className="px-3 py-2 rounded-lg border border-surface-border hover:bg-surface cursor-pointer transition-colors"
+              /* Sem `transition-colors` de propósito. Rolando a lista, o cursor
+                 atravessa um card após o outro e o `:hover` muda de elemento a
+                 cada poucos pixels; com transição, cada card trocado deixa de
+                 ser uma pintura e passa a ser uma animação de ~150 ms, então
+                 passar por dez cards vira dezenas de frames repintando durante
+                 o scroll. O realce de hover continua — só é imediato. */
+              className="px-3 py-2 rounded-lg border border-surface-border hover:bg-surface cursor-pointer"
             >
               <div className="flex items-center justify-between gap-3">
                 <p className="text-sm font-semibold text-ink truncate">
