@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CalendarDays,
+  Package,
   LogOut,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
@@ -21,6 +22,7 @@ interface SidebarProps {
 const navItems = [
   { to: "/app/dashboard", icon: LayoutDashboard, label: "Dashboard Executivo", exact: true },
   { to: "/app/meetings",  icon: CalendarDays,    label: "Reuniões",             exact: false },
+  { to: "/app/products",  icon: Package,         label: "Produtos",             exact: false },
   { to: "/app/insights",  icon: Lightbulb,       label: "Insights",             exact: true },
   { to: "/app/chat",      icon: MessageSquare,   label: "Chat IA",              exact: true },
 ];

@@ -15,8 +15,11 @@ import {
 } from "../services/dashboardService";
 import { useAsync } from "../lib/useAsync";
 import { PageError, PageLoader } from "../components/ui/PageState";
+import { ProductMeetingGroup } from "../components/products/ProductMeetingGroup";
+import { LegendDot } from "../components/ui/LegendDot";
+import { EmptyChart } from "../components/ui/EmptyChart";
 import type {
-  ExecutiveDashboard, MonthlyComparison, ProductBreakdown, ProductMeetingItem,
+  ExecutiveDashboard, MonthlyComparison, ProductBreakdown,
   RankedMeeting, SegmentRiskOpportunity, ThemeRanking, UfRisk,
 } from "../types";
 
@@ -295,15 +298,6 @@ function ProductBar({ product, maxMentions, onSelect }: {
   );
 }
 
-function LegendDot({ color, label }: { color: string; label: string }) {
-  return (
-    <span className="flex items-center gap-1.5">
-      <span className={`w-2 h-2 rounded-full ${color}`} />
-      {label}
-    </span>
-  );
-}
-
 /** Reuniões por trás dos números de um produto, agrupadas por reclamação/gap/
  * elogio — aberto ao clicar numa barra do Gráfico de Produto. */
 function ProductMeetingsModal({ nome, onClose }: { nome: string; onClose: () => void }) {
@@ -366,53 +360,6 @@ function ProductMeetingsModal({ nome, onClose }: { nome: string; onClose: () => 
         </div>
       </div>
     </>
-  );
-}
-
-function ProductMeetingGroup({ label, color, dot, items, onOpen, emptyLabel }: {
-  label: string;
-  color: string;
-  dot: string;
-  items: ProductMeetingItem[];
-  onOpen: (analysisId: string) => void;
-  emptyLabel: string;
-}) {
-  return (
-    <div>
-      <h3 className={`text-xs font-bold uppercase tracking-wide flex items-center gap-1.5 mb-2 ${color}`}>
-        <span className={`w-2 h-2 rounded-full ${dot}`} />
-        {label} ({items.length})
-      </h3>
-      {items.length === 0 ? (
-        <p className="text-xs text-ink-muted">{emptyLabel}</p>
-      ) : (
-        <div className="space-y-2">
-          {items.map((item) => (
-            <div
-              key={item.analysisId}
-              onClick={() => onOpen(item.analysisId)}
-              className="px-3 py-2 rounded-lg border border-surface-border hover:bg-surface cursor-pointer transition-colors"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold text-ink truncate">
-                  Reunião {item.externalMeetingId}
-                  {(item.uf || item.segmento) && (
-                    <span className="text-ink-secondary font-normal">
-                      {" "}({[item.uf, item.segmento].filter(Boolean).join(" · ")})
-                    </span>
-                  )}
-                </p>
-              </div>
-              <ul className="mt-1 space-y-0.5">
-                {item.itens.map((texto, i) => (
-                  <li key={i} className="text-xs text-ink-secondary line-clamp-2">• {texto}</li>
-                ))}
-              </ul>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -692,12 +639,3 @@ function RankedMeetingsSection({
   );
 }
 
-/* ── shared ────────────────────────────────────────────────────────────── */
-
-function EmptyChart({ label }: { label: string }) {
-  return (
-    <div className="h-[120px] flex items-center justify-center text-xs text-ink-muted text-center px-4">
-      {label}
-    </div>
-  );
-}

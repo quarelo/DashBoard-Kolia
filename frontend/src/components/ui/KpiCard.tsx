@@ -9,7 +9,7 @@ interface KpiCardProps {
   /** Texto simples abaixo do valor, sem seta — para contexto que não é uma variação (ex: "3 menções"). */
   caption?: string;
   icon: React.ReactNode;
-  accent?: "brand" | "emerald" | "rose" | "violet" | "blue";
+  accent?: "brand" | "emerald" | "rose" | "violet" | "blue" | "amber";
 }
 
 const accentMap = {
@@ -18,6 +18,7 @@ const accentMap = {
   rose:    { iconBg: "bg-rose-50",    iconColor: "text-rose-600",      bar: "bg-rose-500" },
   violet:  { iconBg: "bg-violet-50",  iconColor: "text-violet-600",    bar: "bg-violet-500" },
   blue:    { iconBg: "bg-blue-50",    iconColor: "text-blue-600",      bar: "bg-blue-500" },
+  amber:   { iconBg: "bg-amber-50",   iconColor: "text-amber-600",     bar: "bg-amber-400" },
 };
 
 export function KpiCard({ label, value, change, changeLabel, caption, icon, accent = "brand" }: KpiCardProps) {

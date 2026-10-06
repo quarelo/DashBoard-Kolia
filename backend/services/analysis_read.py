@@ -10,6 +10,8 @@ Somente leitura — nenhuma migration do backend gerencia o schema ``ai``.
 """
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any
 from uuid import UUID
 
@@ -17,7 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 # Colunas de ai.meeting_analyses + metadados da reunião importada (quando existir).
-_BASE_SELECT = """
+_SELECT_TEMPLATE = """
     SELECT
         a.id                AS analysis_id,
         a.external_meeting_id,
@@ -33,11 +35,24 @@ _BASE_SELECT = """
         a.final_summary,
         m.id                AS meeting_id,
         m.external_id       AS meeting_external_id,
-        m.source_metadata   AS meeting_metadata,
-        m.transcription     AS meeting_transcription
+        m.source_metadata   AS meeting_metadata{extra}
     FROM ai.meeting_analyses a
     LEFT JOIN core.meetings m ON m.analysis_id = a.id
 """
+
+# `m.transcription` fica fora do SELECT das agregações de propósito. É a coluna
+# mais gorda do banco (15 MB somando as 912 reuniões, 77 kB na maior) e nenhuma
+# agregação lê o texto — só `get_analysis`, que carrega uma reunião. As quatro
+# agregações varrem a tabela inteira sem LIMIT, então arrastá-la custava 1,32 s
+# por chamada contra 0,14 s sem ela (201 análises, Postgres remoto). A Página de
+# Produto faz três dessas chamadas em paralelo e esperava 3,5 s para receber
+# 1 KB de JSON de insights.
+_BASE_SELECT = _SELECT_TEMPLATE.format(extra="")
+
+# Só a leitura de uma análise, onde a transcrição é o próprio conteúdo da tela.
+_DETAIL_SELECT = _SELECT_TEMPLATE.format(
+    extra=",\n        m.transcription     AS meeting_transcription",
+)
 
 
 def _num(value: Any) -> float:
@@ -132,6 +147,25 @@ def _build_filters(
     return where, params
 
 
+# Reuniões que citam este produto, de propósito **sem** exigir que o citem
+# sozinho: é a condição mais frouxa das duas, então as agregações por produto
+# continuam aplicando a regra de produto único em Python (abaixo), e nenhuma
+# reunião que elas contavam antes deixa de chegar aqui. O que este `WHERE` faz é
+# poupar o banco de mandar — e o Python de desserializar — o `final_summary` das
+# reuniões que não têm nada a ver com o produto: 60 das 201 análises não citam
+# produto nenhum, e as que citam espalham-se por dezenas de nomes.
+#
+# De quebra, a contagem de linhas que passam por aqui é exatamente
+# `mencoes_totais` (toda menção, inclusive em reunião multi-produto), que antes
+# a Página de Produto só conseguia agregando o `/executive` inteiro.
+_CITES_PRODUCT = " AND a.final_summary -> 'produto' @> jsonb_build_array(CAST(:produto AS text))"
+
+
+def _product_query(extra_where: str) -> str:
+    """`_BASE_SELECT` restrito às reuniões que citam o produto de `:produto`."""
+    return _BASE_SELECT + " WHERE 1=1" + _CITES_PRODUCT + extra_where
+
+
 def list_analyses(
     db: Session,
     offset: int,
@@ -170,7 +204,7 @@ def list_analyses(
 
 def get_analysis(db: Session, analysis_id: UUID) -> dict | None:
     row = db.execute(
-        text(_BASE_SELECT + " WHERE a.id = :id"), {"id": str(analysis_id)}
+        text(_DETAIL_SELECT + " WHERE a.id = :id"), {"id": str(analysis_id)}
     ).first()
     if row is None:
         return None
@@ -421,8 +455,7 @@ def product_meetings(
         uf=uf, segmento=segmento, unidade=unidade, formato=formato,
         cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
     )
-    query = _BASE_SELECT + ((" WHERE 1=1" + extra_where) if extra_where else "")
-    rows = db.execute(text(query), params).all()
+    rows = db.execute(text(_product_query(extra_where)), {**params, "produto": nome}).all()
 
     reclamacoes: list[dict] = []
     gaps: list[dict] = []
@@ -460,6 +493,302 @@ def product_meetings(
                 elogios.append({**meeting_entry, "itens": feedback_itens})
 
     return {"produto": nome, "reclamacoes": reclamacoes, "gaps": gaps, "elogios": elogios}
+
+
+# A natureza de um gap, por vocabulário. Léxico e não embedding de propósito:
+# as categorias abaixo saíram da contagem de palavras dos 391 gaps da carga
+# atual (`integração` 79, `ausência`/`falta` 138, `automação`/`automática` 80,
+# `nativa` 36, `controle` 28), então a regra é derivada do dado em vez de
+# adivinhada, e roda sem chamar modelo — o que importa porque a tela abre em
+# ~70ms e uma passada de embedding por gap custaria 52ms cada, quente.
+#
+# Medido sobre os 391 gaps: 85,2% caem numa categoria. O resto é heterogêneo de
+# verdade ("Falta de líder de produção definido na empresa") e inclui extração
+# ruim da IA ("Nenhum gap identificado no portfólio TOTVS." veio como gap), daí
+# `Não classificado` ser uma fatia visível na resposta em vez de ser escondida:
+# o tamanho dela é o aviso de que a taxonomia não cobre tudo.
+#
+# Rótulo único por gap, não multi-rótulo, para a soma das fatias fechar com o
+# total de gaps. Empate resolve pela ordem desta lista.
+_GAP_NATURE_RULES: tuple[tuple[str, str], ...] = (
+    ("Integração", r"integra|conect|api\b|interface com|sincroniz|conciliac|troca de dados|webservice|middleware|vincula(r|cao|ndo) (direta|entre|dados)"),
+    ("Automação de fluxo", r"automa|automatic|manual|manualmente|jobs?\b|robo|sem intervenc|fluxo de aprovac"),
+    ("Fiscal e tributário", r"fiscal|tribut|ncm|notas? fiscal|notas fiscais|icms|sped|nfe|nf-e|e-cfc|cfop|imposto|obrigac|contabil|licitac"),
+    ("Relatório e indicador", r"relatori|indicador|dashboard|painel|bi\b|analytics|visualizar hist|tendencia|grafico|metrica|kpi|funil|previsibilidade|gargalo|previsoes|visualizacao"),
+    ("Controle e rastreabilidade", r"controle|rastrea|estoque|invent|cadastro|etiqueta|codigo de barras|validade|lote\b|apontamento|historico de|banco de talentos"),
+    ("Capacidade e performance", r"limite|limitac|performance|lentid|volume|capacidade|processamento|escalabilidade|requisic|infraestrutura|compatibilidade|servidor"),
+    ("Financeiro e cobrança", r"financeir|boleto|cobranc|comiss|faturamento|pagamento|parcela|credito|adiantamento|reajuste|precific|pix\b|maquinin|multa"),
+    ("Customização e parametrização", r"customiza|parametriz|campo novo|campos adicionais|configurav|desenvolvimento|personaliza|autonomia para|edicao de|editar"),
+    ("Usabilidade", r"usabilidade|layout|interface|acessibilidade|facilidade de uso|complexidade|dificuldade (de uso|tecnica|em)|intuitiv|experiencia do usuario|botao|simplificada"),
+    ("Serviço e implantação", r"implantac|prazo|suporte|treinamento|consultoria|horas contratadas|documentac|contrato|plano advanced|licenciamento|migrac|descontinuac|porte da empresa"),
+)
+_GAP_NATURE_COMPILED = tuple((name, re.compile(pattern)) for name, pattern in _GAP_NATURE_RULES)
+GAP_NATURE_UNCLASSIFIED = "Não classificado"
+
+
+def _strip_accents(value: str) -> str:
+    """Os padrões acima são escritos sem acento para não precisarem de variante
+    por grafia — `integração`, `integracao` e `INTEGRAÇÃO` caem no mesmo."""
+    decomposed = unicodedata.normalize("NFD", value.lower())
+    return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+
+
+def classify_gap(gap: str) -> str:
+    """A categoria de um gap, ou ``GAP_NATURE_UNCLASSIFIED``.
+
+    Ganha a categoria com mais ocorrências de vocabulário; a ordem de
+    ``_GAP_NATURE_RULES`` decide empate (e é por isso que `Integração` vem antes
+    de `Financeiro`: "integração do meio de pagamento" é gap de integração).
+    """
+    plain = _strip_accents(gap)
+    best = max(
+        (len(pattern.findall(plain)), -index, name)
+        for index, (name, pattern) in enumerate(_GAP_NATURE_COMPILED)
+    )
+    hits, _, name = best
+    return name if hits else GAP_NATURE_UNCLASSIFIED
+
+
+def _empty_health_bucket() -> dict[str, int]:
+    return {"reunioes": 0, "reclamacoes": 0, "gaps": 0, "elogios": 0}
+
+
+def _bump_health(bucket: dict[str, int], *, reclamacoes: int, gaps: int, elogios: int) -> None:
+    bucket["reunioes"] += 1
+    bucket["reclamacoes"] += reclamacoes
+    bucket["gaps"] += gaps
+    bucket["elogios"] += elogios
+
+
+def product_insights(
+    db: Session,
+    nome: str,
+    *,
+    uf: str | None = None,
+    segmento: str | None = None,
+    unidade: str | None = None,
+    formato: str | None = None,
+    cnae: str | None = None,
+    dt_meeting_from: str | None = None,
+    dt_meeting_to: str | None = None,
+) -> dict:
+    """Dados de apoio à Página de Produto: saúde mês a mês, cruzamento com
+    segmento/UF/CNAE e personas envolvidas, para um produto específico.
+
+    Mesma limitação de :func:`executive_overview` e :func:`product_meetings`:
+    só entra reunião que cita esse produto sozinho (``final_summary.produto``
+    com um único item) — consistência com o Gráfico de Produto do dashboard
+    executivo. Ver ``docs/product-page-analytics.md``.
+
+    A exceção é ``mencoes_totais``, que conta toda reunião que cita o produto,
+    inclusive junto com outros — é o número de ``top_produtos[].mencoes`` no
+    ``/executive``, servido aqui para a tela não precisar das duas chamadas.
+    """
+    extra_where, params = _build_filters(
+        uf=uf, segmento=segmento, unidade=unidade, formato=formato,
+        cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+    )
+    rows = db.execute(text(_product_query(extra_where)), {**params, "produto": nome}).all()
+
+    monthly: dict[str, dict[str, int]] = {}
+    persona_counts: dict[str, int] = {}
+    nature_counts: dict[str, int] = {}
+    reunioes_detalhadas = 0
+
+    for row in rows:
+        fs = row.final_summary if isinstance(row.final_summary, dict) else {}
+        products = _as_list(fs.get("produto"))
+        if len(products) != 1 or products[0] != nome:
+            continue
+        reunioes_detalhadas += 1
+
+        sentimento = _summary_block(fs, "sentimento")
+        reclamacoes = len(_as_list(fs.get("problemas_identificados")))
+        gap_itens = _as_list(fs.get("gap_produto"))
+        gaps = len(gap_itens)
+        for gap in gap_itens:
+            categoria = classify_gap(gap)
+            nature_counts[categoria] = nature_counts.get(categoria, 0) + 1
+        # Mesmo critério do agregado e de `product_meetings`: feedback só vira
+        # elogio quando o sentimento geral da reunião já foi positivo.
+        elogios = (
+            len(_as_list(fs.get("feedback_produto")))
+            if sentimento.get("classificacao") == "positivo" else 0
+        )
+
+        metadata = row.meeting_metadata or {}
+        month = _month_key(metadata.get("DT_MEETING"))
+        if month:
+            _bump_health(monthly.setdefault(month, _empty_health_bucket()),
+                         reclamacoes=reclamacoes, gaps=gaps, elogios=elogios)
+
+        for persona in _as_list(fs.get("persona")):
+            persona_counts[persona] = persona_counts.get(persona, 0) + 1
+
+    return {
+        "produto": nome,
+        # Toda reunião que cita o produto, mesmo junto com outros — o mesmo
+        # número que `top_produtos[].mencoes` do `/executive` dá para este
+        # produto, pelos mesmos filtros. Vive aqui para a Página de Produto não
+        # precisar carregar o `/executive` inteiro só para ler um KPI, e porque
+        # `top_produtos` corta no Top 10: um produto fora dos dez mais citados
+        # não tinha de onde tirar as menções.
+        "mencoes_totais": len(rows),
+        "reunioes_detalhadas": reunioes_detalhadas,
+        "saude_mensal": [
+            {"mes": mes, **bucket} for mes, bucket in sorted(monthly.items())
+        ],
+        # A natureza dos gaps substituiu a quebra por UF/segmento/CNAE: aquelas
+        # três eram a mesma contagem de reclamação/gap/elogio num terceiro
+        # recorte, e com mediana de 1 reunião detalhada por produto cada uma
+        # rendia uma barra só. Esta conta **itens**, não reuniões — mediana de 3
+        # gaps por produto, máximo 22 —, então tem material para um gráfico.
+        "natureza_gaps": sorted(
+            ({"categoria": chave, "ocorrencias": n} for chave, n in nature_counts.items()),
+            key=lambda e: (e["categoria"] == GAP_NATURE_UNCLASSIFIED, -e["ocorrencias"]),
+        ),
+        "personas": sorted(
+            ({"nome": chave, "ocorrencias": n} for chave, n in persona_counts.items()),
+            key=lambda e: e["ocorrencias"], reverse=True,
+        ),
+    }
+
+
+def product_gap_texts(
+    db: Session,
+    nome: str,
+    *,
+    uf: str | None = None,
+    segmento: str | None = None,
+    unidade: str | None = None,
+    formato: str | None = None,
+    cnae: str | None = None,
+    dt_meeting_from: str | None = None,
+    dt_meeting_to: str | None = None,
+    limit: int = 200,
+) -> list[str]:
+    """Os textos de ``gap_produto`` das reuniões deste produto, sem repetição.
+
+    É o insumo que o roteador manda para a IA casar contra o catálogo. Fica aqui
+    e não na IA porque o recorte "reuniões deste produto, sob estes filtros"
+    depende de ``core.meetings``, que a IA não lê. `limit` é o mesmo teto do
+    ``GapCoverageRequest`` da IA — cortar aqui dá uma resposta parcial em vez de
+    um 422 numa carga maior.
+    """
+    extra_where, params = _build_filters(
+        uf=uf, segmento=segmento, unidade=unidade, formato=formato,
+        cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+    )
+    rows = db.execute(text(_product_query(extra_where)), {**params, "produto": nome}).all()
+    seen: dict[str, None] = {}
+    for row in rows:
+        fs = row.final_summary if isinstance(row.final_summary, dict) else {}
+        products = _as_list(fs.get("produto"))
+        if len(products) != 1 or products[0] != nome:
+            continue
+        for gap in _as_list(fs.get("gap_produto")):
+            cleaned = gap.strip()
+            if cleaned:
+                seen.setdefault(cleaned, None)
+    return list(seen)[:limit]
+
+
+# As cinco métricas do perfil de qualidade, na ordem em que a tela as mostra.
+# `maior_e_melhor` existe porque a barra divergente precisa saber de que lado
+# está o bom: 10 pontos acima da média é ótimo em oportunidade e péssimo em
+# risco de churn, e sem isso tudo verde para o lado direito mentiria.
+_QUALITY_METRICS: tuple[tuple[str, str, bool], ...] = (
+    ("risco_churn", "Risco de churn", False),
+    ("oportunidade", "Oportunidade", True),
+    ("satisfacao", "Reuniões com sentimento positivo", True),
+    ("gaps_por_reuniao", "Gaps por reunião", False),
+    ("duvidas_por_reuniao", "Dúvidas em aberto por reunião", False),
+)
+
+
+def _quality_metrics(rows: list) -> tuple[dict[str, float], int]:
+    """As cinco médias sobre as reuniões de produto único que vieram em `rows`."""
+    risco = oportunidade = positivos = gaps = duvidas = 0.0
+    total = 0
+    for row in rows:
+        fs = row.final_summary if isinstance(row.final_summary, dict) else {}
+        if len(_as_list(fs.get("produto"))) != 1:
+            continue
+        total += 1
+        risco += _num(_summary_block(fs, "risco_churn").get("score"))
+        oportunidade += _num(_summary_block(fs, "score_oportunidade").get("score"))
+        if _summary_block(fs, "sentimento").get("classificacao") == "positivo":
+            positivos += 1
+        gaps += len(_as_list(fs.get("gap_produto")))
+        duvidas += len(_as_list(fs.get("duvidas_em_aberto")))
+    if not total:
+        return {key: 0.0 for key, _label, _up in _QUALITY_METRICS}, 0
+    return {
+        "risco_churn": round(risco / total, 1),
+        "oportunidade": round(oportunidade / total, 1),
+        "satisfacao": round(positivos / total * 100, 1),
+        "gaps_por_reuniao": round(gaps / total, 2),
+        "duvidas_por_reuniao": round(duvidas / total, 2),
+    }, total
+
+
+def product_quality_profile(
+    db: Session,
+    nome: str,
+    *,
+    uf: str | None = None,
+    segmento: str | None = None,
+    unidade: str | None = None,
+    formato: str | None = None,
+    cnae: str | None = None,
+    dt_meeting_from: str | None = None,
+    dt_meeting_to: str | None = None,
+) -> dict:
+    """O produto em cinco métricas, cada uma ao lado da média do portfólio.
+
+    A comparação é o ponto, não a métrica solta: com mediana de 1 reunião
+    detalhada por produto, uma série temporal ou um ranking não dizem nada, mas
+    "risco 20 pontos acima da média do portfólio" diz, mesmo com n=1. Por isso
+    a resposta sempre carrega `reunioes` nos dois lados — a tela precisa poder
+    avisar quando o número vem de uma reunião só.
+
+    A base de comparação é a mesma população do numerador (reuniões que citam um
+    produto só, sob os mesmos filtros), senão a média do portfólio incluiria
+    reuniões multi-produto e de produto nenhum, e a diferença mediria isso em
+    vez de medir o produto.
+    """
+    extra_where, params = _build_filters(
+        uf=uf, segmento=segmento, unidade=unidade, formato=formato,
+        cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+    )
+    product_rows = db.execute(
+        text(_product_query(extra_where)), {**params, "produto": nome},
+    ).all()
+    # O portfólio inteiro: a única leitura desta tela que não é recortada por
+    # produto. Sem a transcrição (ver `_BASE_SELECT`) são ~0,14s nas 201
+    # análises; é o preço da linha de base.
+    portfolio_rows = db.execute(
+        text(_BASE_SELECT + ((" WHERE 1=1" + extra_where) if extra_where else "")), params,
+    ).all()
+
+    produto_valores, produto_reunioes = _quality_metrics(product_rows)
+    portfolio_valores, portfolio_reunioes = _quality_metrics(portfolio_rows)
+
+    return {
+        "produto": nome,
+        "reunioes": produto_reunioes,
+        "reunioes_portfolio": portfolio_reunioes,
+        "metricas": [
+            {
+                "chave": chave,
+                "rotulo": rotulo,
+                "valor": produto_valores[chave],
+                "media_portfolio": portfolio_valores[chave],
+                "maior_e_melhor": maior_e_melhor,
+            }
+            for chave, rotulo, maior_e_melhor in _QUALITY_METRICS
+        ],
+    }
 
 
 def overview(

@@ -5,6 +5,8 @@ import { Register } from "./pages/Register";
 import { Dashboard } from "./pages/Dashboard";
 import { Meetings } from "./pages/Meetings";
 import { MeetingDetail } from "./pages/MeetingDetail";
+import { Products } from "./pages/Products";
+import { ProductDetail } from "./pages/ProductDetail";
 import { Insights } from "./pages/Insights";
 import { Chat } from "./pages/Chat";
 import { AppLayout } from "./components/layout/AppLayout";
@@ -25,6 +27,8 @@ export default function App() {
               <Route path="dashboard" element={<Dashboard />} />
               <Route path="meetings" element={<Meetings />} />
               <Route path="meetings/:id" element={<MeetingDetail />} />
+              <Route path="products" element={<Products />} />
+              <Route path="products/:nome" element={<ProductDetail />} />
               <Route path="insights" element={<Insights />} />
               <Route path="chat" element={<Chat />} />
             </Route>

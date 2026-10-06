@@ -109,6 +109,36 @@ class Settings(BaseSettings):
     # one was, since that needs the model actually running on real meetings.
     product_grounding_confident_distance: float = 0.20
     product_grounding_plausible_distance: float = 0.45
+    # Cobertura de gap pelo catálogo (gap_coverage_service). Limiares de
+    # **margem** (d5 - d1), não de distância absoluta, e calibrados nos 354 gaps
+    # distintos da carga atual contra os 302 produtos — ao contrário dos dois
+    # acima, que seguem não calibrados. A distância ao vizinho mais próximo não
+    # discrimina aqui (p5 0,233 / mediana 0,293 / p90 0,339); a margem sim. Nos
+    # 12 gaps de maior margem a inspeção manual deu 12 acertos, e nos 8 de menor
+    # margem, 8 rejeições corretas. Com estes valores a carga atual cai em 7,6%
+    # provável, 27,4% possível, 65% sem cobertura.
+    gap_coverage_likely_margin: float = 0.055
+    gap_coverage_possible_margin: float = 0.030
+    # A faixa do meio está **desligada** desde 2026-10-01. Ela existe e está
+    # calibrada, mas acerta cerca de metade: na tela, apareceu
+    # "App Meu Controle Fitossanitário" como sugestão para um gap sobre
+    # visualizar carga e histórico de entrega num CRM (margem 0,0324, passando
+    # raspando deste 0,030). Uma sugestão errada ao lado de um produto não é
+    # neutra — ela faz quem lê desconfiar do card inteiro, inclusive das
+    # sugestões da faixa de cima, que na inspeção manual deram 12 de 12. Com a
+    # faixa desligada, o que cairia nela conta como "sem cobertura".
+    #
+    # A causa já está medida e não é o limiar: o vetor de cada produto é feito
+    # de `nome + descrição de marketing inteira`, e as descrições afogam o
+    # sinal (todas dizem "O aplicativo Meu X foi desenvolvido especialmente
+    # para..."). Buscando contra só o **nome** do produto, o mesmo gap traz os
+    # quatro produtos de entrega do catálogo nas quatro primeiras posições.
+    # Religar esta faixa depende de corrigir aquilo e recalibrar as margens
+    # depois — ver docs/product-page-analytics.md.
+    gap_coverage_possible_enabled: bool = False
+    # Teto de sanidade: margem alta com o vizinho longe assim mesmo é um gap que
+    # o catálogo todo ignora. 0,32 é o p80 da distribuição medida.
+    gap_coverage_distance_ceiling: float = 0.32
     model: str = Field(default="qwen3.5:4b-q4_K_M", validation_alias=AliasChoices("MODEL", "OLLAMA_MODEL"))
     chunk_model: str = Field(default="qwen3.5:4b-q4_K_M", validation_alias=AliasChoices("CHUNK_MODEL", "OLLAMA_CHUNK_MODEL"))
     consolidation_model: str = Field(default="qwen3.5:4b-q4_K_M", validation_alias=AliasChoices("CONSOLIDATION_MODEL", "OLLAMA_CONSOLIDATION_MODEL"))
