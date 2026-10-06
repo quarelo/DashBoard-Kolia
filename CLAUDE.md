@@ -92,6 +92,28 @@ medições em lote foram mortas por falta de memória, e uma delas levou o resul
 junto. Em script de medição: `OLLAMA_KEEP_ALIVE=20s`, uma chamada de LLM por vez,
 e resultado gravado a cada item, não só no fim.
 
+**Toda chamada ao Ollama precisa mandar `keep_alive` no corpo.** Quem não manda
+pega o padrão do Ollama, de 5 minutos, em vez dos 30 que o `.env` configura — e a
+diferença não é pequena: carregar um modelo custa **~5 s** contra **~17 ms** de
+uma chamada com ele residente. Em 2026-10-06 a chamada de embedding era a única
+sem o campo, e isso fazia o gráfico de cobertura de gap da Página de Produto
+demorar "às vezes" (`ollama ps` mostrava `nomic-embed-text` com 4 minutos de vida
+e `qwen3.5` com 29).
+
+**Só um modelo fica residente por vez** (`OLLAMA_MAX_LOADED_MODELS=1` no
+container do Ollama), então geração e embedding se expulsam: depois de uma
+chamada do chat, `ollama ps` mostra só o modelo de geração, e a próxima chamada
+de embedding paga a carga inteira. `keep_alive` não protege contra isso —
+protege só contra o tempo. Quem precisa de embedding rápido logo após uma
+geração tem de contar com cache próprio, ou o valor sobe para `2` (cabe: a GPU
+tem ~6,3 GB livres contra 323 MB do modelo de embedding), o que ainda não foi
+medido nesta máquina.
+
+Chamada de embedding com vários textos vai em **uma** requisição: o `/api/embed`
+aceita `input` como lista, e o que pesa é o ida-e-volta, não o cálculo — 20
+textos custaram 400 ms em 20 chamadas e 147 ms em uma (`generate_embeddings` em
+`ia/src/app/services/llm_service.py`).
+
 ## Configuração
 
 Existe **um** `.env`, na raiz, ao lado do `docker-compose.yml`. As configs dos dois

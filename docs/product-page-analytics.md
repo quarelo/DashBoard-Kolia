@@ -268,19 +268,64 @@ coisa.
 
 ### Custo
 
-É a chamada mais lenta da tela, e a única que depende do Ollama. Embeddar um gap
-custa ~52 ms com o modelo quente e ~9 s a frio (carga do modelo), e um produto
-chega a 22 gaps. Por isso `gap_coverage_service` mantém um **cache de embedding
-em processo**, endereçado pelo texto: medido, a mesma chamada cai de 3,67 s para
-0,33 s, e o piso de 0,33 s é a busca vetorial em si (uma por gap, sobre 302
-produtos). Um produto novo, com o Ollama já quente, custou 0,68 s para 15 gaps.
+É a chamada mais lenta da tela, e a única que depende do Ollama. O que domina
+não é o cálculo do vetor — é **o modelo de embedding estar ou não residente**:
+
+| | |
+|---|---|
+| Uma chamada de embedding com o modelo residente | **17 ms** |
+| A mesma chamada com o modelo descarregado | **5.028 ms** |
+| 20 gaps em 20 chamadas separadas | 400 ms |
+| Os mesmos 20 numa chamada só (`input` como lista) | **147 ms** |
+| As 20 buscas vetoriais no pgvector | 280 ms (~14 ms cada) |
+
+Daí as quatro coisas que o serviço faz, nesta ordem de importância:
+
+1. **`keep_alive` na chamada de embedding** (`llm_service.generate_embeddings`).
+   Ela era a única chamada do serviço que não o mandava, então o Ollama aplicava
+   o padrão de 5 minutos enquanto o modelo de geração ficava com os 30
+   configurados — `ollama ps` mostrava `nomic-embed-text` com 4 minutos e
+   `qwen3.5` com 29. Era a causa de a tela demorar "às vezes".
+2. **Aquecimento no startup** (`main._warm_embedding_model`, em thread). Passa a
+   carga de 5 s para a subida do serviço, onde ninguém espera. Antes quem pagava
+   era a primeira abertura da Página de Produto depois de cada restart: medido,
+   5,7 s antes contra 0,75 s agora.
+3. **Embedding em lote**: uma chamada ao Ollama com todos os gaps que faltam, em
+   `_warm_cache`, antes do laço — não uma por gap.
+4. **Cache de embedding em processo**, endereçado pelo texto. Reabrir um produto
+   já visitado custa ~0,35 s, que é o piso da busca vetorial.
+
+Medido depois das quatro (201 análises, Postgres remoto):
+
+| Cenário | Antes | Depois |
+|---|---|---|
+| Primeiro produto depois de um restart | ~5,7 s | **0,75 s** |
+| Produto novo, modelo residente | ~0,7 s | **0,44–0,60 s** |
+| Produto já visitado | ~0,33 s | ~0,35 s (igual: é o piso do pgvector) |
+| Produto novo **depois de o chat rodar** | ~5,7 s | **4,97 s — ainda dói** |
+
+A última linha é o que sobrou, e não tem conserto no código da IA:
+`OLLAMA_MAX_LOADED_MODELS=1` no container do Ollama deixa **um** modelo
+residente por vez, então qualquer geração (chat, análise) expulsa o de
+embedding, e `keep_alive` não protege contra expulsão por outro modelo —
+verificado: depois de uma geração, `ollama ps` mostra só o `qwen3.5`. Subir para
+`2` caberia (GPU com 6.358 MiB livres contra 323 MB do modelo de embedding), mas
+mexe no uso de memória do host, onde medições já morreram por falta dela, e o
+`CLAUDE.md` da raiz registra que mexer em `OLLAMA_NUM_PARALLEL` foi medido e foi
+pior. Fica pendente, para ser medido antes e depois.
+
+Note que o cache reduz esse caso a uma faixa estreita: ele só aparece quando o
+produto **ainda não foi visitado** e uma geração rodou desde então. Produto já
+visitado responde em 0,38 s mesmo com o modelo expulso, porque não precisa dele.
 
 O cache é em memória e não em tabela: os 354 gaps distintos da carga ocupam
 ~2,6 MB de vetor, e uma tabela exigiria migration no schema `ai`. Esvazia no
-restart do `ia-service`. Se a persistência passar a importar, o passo seguinte é
-uma tabela endereçada por hash do texto — e ela, por não ser ligada a análise
-nenhuma, **não** entraria em `AI_ROWS_BY_ANALYSIS` (ver a exceção de exclusão de
-reunião no `CLAUDE.md` da raiz).
+restart do `ia-service` — o que hoje importa menos, porque o aquecimento do item
+2 cobre justamente a primeira chamada depois do restart. Se a persistência
+passar a importar, o passo seguinte é uma tabela endereçada por hash do texto —
+e ela, por não ser ligada a análise nenhuma, **não** entraria em
+`AI_ROWS_BY_ANALYSIS` (ver a exceção de exclusão de reunião no `CLAUDE.md` da
+raiz).
 
 No frontend este card carrega **fora** do `Promise.all` do resto da página, com
 loading próprio: junto com as outras chamadas, a página inteira voltaria a

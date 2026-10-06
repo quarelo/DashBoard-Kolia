@@ -40,7 +40,7 @@ from sqlalchemy.orm import Session
 
 from src.app.core.config import settings
 from src.app.models.product import Product
-from src.app.services.llm_service import generate_embedding
+from src.app.services.llm_service import generate_embedding, generate_embeddings
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -48,9 +48,12 @@ COVERAGE_LIKELY = "provavel"
 COVERAGE_POSSIBLE = "possivel"
 COVERAGE_NONE = "sem_cobertura"
 
-# Embeddar custa ~52ms com o modelo quente e ~9s a frio (medido no host), e o
-# texto de um gap nunca muda depois que a análise fecha — então o mesmo gap
-# reembeddado a cada abertura da página era puro desperdício. Cache em processo,
+# Embeddar custa ~17 ms com o modelo residente, e o texto de um gap nunca muda
+# depois que a análise fecha — então o mesmo gap reembeddado a cada abertura da
+# página era puro desperdício. (O que custa caro é o modelo *não* estar
+# residente: ~5 s de carga. Contra isso o cache não ajuda, porque é a primeira
+# chamada que paga; quem ajuda é o `keep_alive` em `generate_embeddings` e o
+# aquecimento no startup do serviço.) Cache em processo,
 # não em tabela: os 354 gaps distintos da carga atual ocupam ~2,6 MB de vetor
 # (768 floats), desprezível ao lado dos 4 GB que o Ollama segura, e assim não
 # precisa de migration nem entra na lista de `AI_ROWS_BY_ANALYSIS` do backend.
@@ -61,15 +64,35 @@ _EMBEDDING_CACHE: dict[str, list[float]] = {}
 _CACHE_MAX = 5000
 
 
-def _cached_embedding(text: str) -> list[float]:
-    hit = _EMBEDDING_CACHE.get(text)
-    if hit is not None:
-        return hit
-    embedding = generate_embedding(text)
+def _store(text: str, embedding: list[float]) -> list[float]:
     if len(_EMBEDDING_CACHE) >= _CACHE_MAX:
         _EMBEDDING_CACHE.clear()
     _EMBEDDING_CACHE[text] = embedding
     return embedding
+
+
+def _cached_embedding(text: str) -> list[float]:
+    hit = _EMBEDDING_CACHE.get(text)
+    if hit is not None:
+        return hit
+    return _store(text, generate_embedding(text))
+
+
+def _warm_cache(texts: list[str]) -> int:
+    """Embedda de uma vez os textos que ainda não estão no cache.
+
+    Sem isto o laço de `match_gaps` fazia uma chamada ao Ollama por gap, e o que
+    pesa numa chamada de embedding é o ida-e-volta, não o cálculo: medido com 20
+    gaps, 400 ms em 20 chamadas contra 147 ms numa só. Devolve quantos textos
+    foram embeddados, que é o número que distingue a primeira abertura de um
+    produto das seguintes.
+    """
+    missing = [text for text in texts if text not in _EMBEDDING_CACHE]
+    if not missing:
+        return 0
+    for text, embedding in zip(missing, generate_embeddings(missing)):
+        _store(text, embedding)
+    return len(missing)
 
 
 def cache_size() -> int:
@@ -106,11 +129,12 @@ def match_gaps(db: Session, gaps: list[str], *, suggestions: int = 2) -> dict:
     top_k = max(5, suggestions)
     itens: list[dict] = []
     resumo = {COVERAGE_LIKELY: 0, COVERAGE_POSSIBLE: 0, COVERAGE_NONE: 0}
-    cold = 0
+
+    # Uma chamada ao Ollama para todos os gaps que faltam, antes do laço. Depois
+    # disto `_ranked` acha tudo em cache e só faz a busca vetorial.
+    cold = _warm_cache(unique)
 
     for gap in unique:
-        if gap not in _EMBEDDING_CACHE:
-            cold += 1
         candidates = _ranked(db, gap, top_k)
         if len(candidates) < top_k:
             # Catálogo pequeno demais para a margem significar algo — sem o 5º

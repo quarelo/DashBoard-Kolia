@@ -30,8 +30,19 @@ def _ranking(distances: list[float]):
 
 
 @pytest.fixture(autouse=True)
-def _clear_cache():
+def _isolate_from_ollama(monkeypatch):
+    """Cache limpo e nenhuma chamada real de embedding.
+
+    `match_gaps` aquece o cache em lote antes de rankear, então sem este stub
+    todo teste daqui bateria no Ollama — e a suíte da IA roda fora da rede do
+    Compose justamente para que um teste sem mock falhe em vez de passar
+    chamando o modelo de verdade (ver o CLAUDE.md da raiz).
+    """
     svc._EMBEDDING_CACHE.clear()
+    monkeypatch.setattr(
+        svc, "generate_embeddings",
+        lambda texts: [[0.1] * settings.embedding_dim for _ in texts],
+    )
     yield
     svc._EMBEDDING_CACHE.clear()
 
@@ -113,36 +124,65 @@ def test_faixa_do_meio_volta_a_classificar_quando_religada(monkeypatch):
 
 
 def test_gap_repetido_e_embeddado_uma_vez(monkeypatch):
-    """Dois produtos podem citar o mesmo gap, e a mesma página pode reabrir
-    várias vezes: embeddar custa ~52ms quente e ~9s a frio, então repetir o
-    texto não pode repetir a chamada."""
-    chamadas = []
+    """Dois produtos podem citar o mesmo gap, e a mesma página reabre várias
+    vezes: repetir o texto não pode repetir a chamada ao modelo."""
+    lotes = []
 
-    def spy(text):
-        chamadas.append(text)
-        return [0.1] * settings.embedding_dim
+    def spy(texts):
+        lotes.append(list(texts))
+        return [[0.1] * settings.embedding_dim for _ in texts]
 
-    monkeypatch.setattr(svc, "generate_embedding", spy)
-    captured = {}
-
-    def fake_ranked(db, gap, k):
-        captured[gap] = svc._cached_embedding(gap)
-        return _ranking([0.20, 0.22, 0.25, 0.28, 0.30])
-
-    monkeypatch.setattr(svc, "_ranked", fake_ranked)
+    monkeypatch.setattr(svc, "generate_embeddings", spy)
+    monkeypatch.setattr(svc, "_ranked", lambda db, gap, k: _ranking([0.20, 0.22, 0.25, 0.28, 0.30]))
 
     svc.match_gaps(db=None, gaps=["mesmo gap", "mesmo gap", "mesmo gap"])
     svc.match_gaps(db=None, gaps=["mesmo gap"])
 
-    assert chamadas == ["mesmo gap"], f"embeddou {len(chamadas)}x o mesmo texto"
+    assert lotes == [["mesmo gap"]], f"embeddou em {len(lotes)} lote(s): {lotes}"
     assert svc.cache_size() == 1
+
+
+def test_gaps_novos_vao_num_lote_so(monkeypatch):
+    """O ganho do lote: o que pesa numa chamada de embedding é o ida-e-volta,
+    não o cálculo — medido, 20 gaps custaram 400 ms em 20 chamadas e 147 ms numa
+    só. Se alguém voltar a embeddar dentro do laço, isto quebra."""
+    lotes = []
+
+    def spy(texts):
+        lotes.append(list(texts))
+        return [[0.1] * settings.embedding_dim for _ in texts]
+
+    monkeypatch.setattr(svc, "generate_embeddings", spy)
+    monkeypatch.setattr(svc, "_ranked", lambda db, gap, k: _ranking([0.20, 0.22, 0.25, 0.28, 0.30]))
+
+    svc.match_gaps(db=None, gaps=["gap a", "gap b", "gap c", "gap d"])
+
+    assert lotes == [["gap a", "gap b", "gap c", "gap d"]]
+
+
+def test_lote_pede_so_o_que_falta_no_cache(monkeypatch):
+    """Um produto reaberto depois de outro já ter embeddado parte dos gaps só
+    paga pelos novos."""
+    svc._store("ja em cache", [0.2] * settings.embedding_dim)
+    lotes = []
+
+    def spy(texts):
+        lotes.append(list(texts))
+        return [[0.1] * settings.embedding_dim for _ in texts]
+
+    monkeypatch.setattr(svc, "generate_embeddings", spy)
+    monkeypatch.setattr(svc, "_ranked", lambda db, gap, k: _ranking([0.20, 0.22, 0.25, 0.28, 0.30]))
+
+    svc.match_gaps(db=None, gaps=["ja em cache", "novo"])
+
+    assert lotes == [["novo"]]
 
 
 def test_lista_vazia_nao_chama_o_modelo(monkeypatch):
     def fail_if_called(*_args, **_kwargs):
         raise AssertionError("não deveria embeddar sem gap")
 
-    monkeypatch.setattr(svc, "generate_embedding", fail_if_called)
+    monkeypatch.setattr(svc, "generate_embeddings", fail_if_called)
     monkeypatch.setattr(svc, "_ranked", fail_if_called)
 
     out = svc.match_gaps(db=None, gaps=["", "   "])
