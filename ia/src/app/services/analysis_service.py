@@ -512,6 +512,38 @@ def _declared_unless_enumerated(codes: list[str]) -> list[str]:
     return [] if len(unique) >= _MOTIVE_ENUMERATION_FLOOR else unique
 
 
+def _motives_for(
+    chunk_summaries: list[dict],
+    key: str,
+    facts: list[str],
+    from_text: Callable[[str], list[str]],
+) -> list[str]:
+    """Os códigos de um score: a declaração do modelo quando ele declarou, senão as regras.
+
+    Declarar `[]` é uma decisão — "aqui não tem nada" — e tem que vencer as regras.
+    Escrito como `declarado or regras`, um `[]` era indistinguível de um resumo
+    anterior ao schema com motivos, que é o único caso para o qual o fallback existe.
+    Então uma reunião que o modelo havia liberado caía nas regras, e elas liam o
+    "não há menção de cancelamento" escrito pelo próprio modelo como ameaça de
+    cancelamento: 10 das 25 reuniões com churn 100 eram isso, e ocupavam o Top 5 da
+    dashboard. As regras ganharam a guarda `ABSENCE` para o mesmo defeito, mas ela
+    não dispensa esta correção — a declaração vazia é a resposta mais confiável que
+    existe, e é de graça.
+
+    Uma declaração que cobre o catálogo inteiro continua descartada como enumeração
+    (`_declared_unless_enumerated`), e aí as regras decidem.
+    """
+    if settings.trust_declared_motives and any(key in s for s in chunk_summaries):
+        declared = [code for s in chunk_summaries for code in (s.get(key) or [])]
+        kept = _declared_unless_enumerated(declared)
+        # `kept` vazio com `declared` cheio é a enumeração descartada: cai nas regras.
+        if kept or not declared:
+            return kept
+    # As regras leem o texto da evidência e recusam hipotéticos e negações, então o
+    # "e se não der certo?" de um prospect não pontua como cliente de saída.
+    return [code for fact in facts for code in from_text(fact)]
+
+
 def build_compact_final_summary(
     chunk_summaries: list[dict], source_texts: list[str] | None = None
 ) -> dict:
@@ -566,32 +598,18 @@ def build_compact_final_summary(
         if not _NON_CHURN_CANCELLATION_PATTERN.search(fact)
     ]
 
-    # Codes the model declared under the enum-constrained schema are authoritative:
-    # they do not depend on how it worded the fact. Text inference stays only as a
-    # fallback for summaries produced before the schema carried motives.
-    declared_churn = _declared_unless_enumerated([
-        code for summary in chunk_summaries
-        for code in (summary.get("motivos_churn") or [])
-    ]) if settings.trust_declared_motives else []
-    # Rules read the evidence text the model quoted, which is transcript wording,
-    # rather than its paraphrase — and they refuse hypotheticals, so a prospect's
-    # "e se não der certo?" no longer scores as a customer about to leave.
-    all_churn_motives = declared_churn or [
-        code for fact in filtered_churn_facts for code in churn_motives(fact)
-    ]
+    all_churn_motives = _motives_for(
+        chunk_summaries, "motivos_churn", filtered_churn_facts, churn_motives,
+    )
 
     churn_risk = calculate_churn_risk(all_churn_motives)
 
     # Calculate opportunity score using deterministic scoring
     opportunities = _select_critical_facts(grouped["OPORTUNIDADE"], 3)
 
-    declared_opportunity = _declared_unless_enumerated([
-        code for summary in chunk_summaries
-        for code in (summary.get("motivos_oportunidade") or [])
-    ]) if settings.trust_declared_motives else []
-    all_opportunity_motives = declared_opportunity or [
-        code for fact in opportunities for code in opportunity_motives(fact)
-    ]
+    all_opportunity_motives = _motives_for(
+        chunk_summaries, "motivos_oportunidade", opportunities, opportunity_motives,
+    )
 
     opportunity_score = calculate_opportunity_score(all_opportunity_motives)
 

@@ -120,3 +120,69 @@ class TestDeterminism:
     def test_accents_and_case_do_not_change_the_outcome(self):
         assert churn_motives("VAMOS RESCINDIR O CONTRATO") == \
                churn_motives("vamos rescindir o contrato")
+
+
+class TestDenyingASignalIsNotTheSignal:
+    """Numa reunião tranquila o modelo escreve a ausência sob a tag CHURN, e as
+    regras liam as palavras dentro da negação.
+
+    As frases são as do banco. Dez das 25 reuniões com churn 100 eram uma delas, e
+    pousavam em exatamente 100 porque 50 + 30 + 25 = 105 estoura o teto — o que as
+    punha no topo do Top 5 da dashboard.
+    """
+
+    @pytest.mark.parametrize("fact", [
+        "Não há menção de insatisfação, ameaça de cancelamento ou comparação "
+        "negativa com concorrentes.",
+        "Não há sinais de insatisfação, ameaça de cancelamento ou menção a "
+        "concorrentes que indiquem risco de perda.",
+        "Ausente; não há menção de insatisfação, ameaça de cancelamento ou "
+        "comparação com concorrentes que indique risco de perda.",
+        "Não houve menção a cancelamento, insatisfação com o fornecedor ou "
+        "comparação negativa com concorrentes.",
+        "Não há evidências de intenção de cancelamento, insatisfação explícita "
+        "ou menção a concorrentes.",
+        "Cliente confirma interesse em continuar utilizando o serviço, "
+        "indicando baixa probabilidade de cancelamento.",
+    ])
+    def test_a_denial_scores_zero(self, fact):
+        assert calculate_churn_risk(churn_motives(fact)).score == 0
+
+    def test_a_denial_clause_does_not_silence_a_real_one(self):
+        """Do banco: a insatisfação é real, a ameaça de cancelamento não existia.
+
+        Uma guarda do tamanho da frase jogava os dois fora e devolvia 0; lida por
+        cláusula, a frase vale os 30 da insatisfação e nada mais.
+        """
+        fact = ("Houve desentendimento entre as partes que gerou risco de frustração "
+                "e descontentamento futuro, mas não houve menção explícita de "
+                "cancelamento.")
+        assert churn_motives(fact) == ["INSATISFACAO_EXPLICITA"]
+
+    @pytest.mark.parametrize("fact", [
+        "Cliente expressa insatisfação explícita ao afirmar que não utiliza "
+        "nenhum sistema ERP atualmente.",
+        "Cliente expressa insatisfação ao afirmar que não conhece nenhum sistema "
+        "capaz de realizar a transmissão por embarque eletrônico.",
+        "O cliente expressa insatisfação explícita ao relatar lacunas de "
+        "conhecimento não identificadas na proposta.",
+    ])
+    def test_a_negation_about_something_else_still_scores(self, fact):
+        """Os três do banco que uma guarda de "não" larga demais calava.
+
+        É por isso que `nenhum` e `não identificad*` exigem um substantivo de sinal
+        depois: aqui a negação é sobre o ERP e sobre as lacunas, não sobre o churn.
+        """
+        assert "INSATISFACAO_EXPLICITA" in churn_motives(fact)
+
+    def test_absence_outranks_survives_hypothetical(self):
+        """A ameaça de cancelamento sobrevive ao condicional, mas não à negação."""
+        assert churn_motives("se não melhorar vamos encerrar o contrato") == \
+               ["AMEACA_CANCELAMENTO"]
+        assert churn_motives("não há ameaça de encerrar o contrato") == []
+
+    def test_a_denied_opportunity_scores_zero(self):
+        """Mede pouco deste lado (1 de 856 fatos), mas é o mesmo mecanismo."""
+        fact = ("Não há menção explícita de expansão de contrato, novo módulo ou "
+                "necessidade não atendida pelo portfólio atual.")
+        assert calculate_opportunity_score(opportunity_motives(fact)).score == 0
