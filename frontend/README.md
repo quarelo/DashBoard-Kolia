@@ -33,6 +33,7 @@ com hot reload, então editar os arquivos já atualiza a página. Não rode
 | `/app/meetings/:id` | Resumo da IA, grade de metadados do CSV, transcrição, chat e exclusão | `GET /api/dashboard/meetings/{id}` |
 | `/app/insights` | Visão agregada, montada no navegador a partir de até 60 análises | lista + detalhe |
 | `/app/chat` | Escolhe uma reunião e lista as conversas dela: reabre uma anterior ou começa uma nova, sem apagar as outras | `GET /api/dashboard/meetings/{id}/chat/conversations`, `POST /api/dashboard/meetings/{id}/chat` |
+| `/app/settings` | Pontuação das reuniões: peso de cada sinal com a frequência real ao lado, simulação antes de salvar; salvar só para o Diretor Comercial | `GET /api/dashboard/scoring`, `POST /api/dashboard/scoring/simulate`, `PUT /api/dashboard/scoring` |
 
 A grade de metadados e a transcrição só aparecem em reuniões que entraram pelo
 import do backend. Uma análise enviada direto à IA aparece sem elas. O chat abre

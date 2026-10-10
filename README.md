@@ -189,6 +189,9 @@ docker compose exec ollama nvidia-smi   # confirma que a GPU está visível
 | `GET /api/dashboard/meetings/{analysis_id}/chat/conversations` | Conversas da reunião, a mais recente primeiro |
 | `GET /api/dashboard/meetings/{analysis_id}/chat/conversations/{id}` | Mensagens de uma conversa |
 | `POST /api/dashboard/meetings/{analysis_id}/chat` | Nova pergunta; sem `conversation_id`, começa uma conversa |
+| `GET /api/dashboard/scoring` | Pesos, nomes e frequência real de cada motivo de churn e oportunidade |
+| `POST /api/dashboard/scoring/simulate` | Distribuição que uma régua proposta daria, sem salvar |
+| `PUT /api/dashboard/scoring` | Salva os pesos (só `SALES_DIRECTOR`) |
 
 ### Serviço de IA (`:3000`, token de serviço)
 

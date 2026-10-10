@@ -85,6 +85,11 @@ Lista os cinco códigos de churn e os cinco de oportunidade, cada um com uma
 linha de definição, e instrui que **lista vazia é a resposta correta** quando
 não houver sinal.
 
+Em 2026-10-09 tentou-se apertar a definição de `INTERESSE_NOVO_MODULO`, declarado
+em 708 dos 926 chunks (76%) e por isso quase constante. **A medição não sustentou
+a mudança e o texto voltou ao que era** — ver "Quarta rodada" no fim deste
+documento.
+
 **Duas coisas contraintuitivas registradas no código:**
 
 - Manter o catálogo no prompt foi medido **2,3x mais rápido** (132s contra 301s,
@@ -768,3 +773,76 @@ calibração: as frases certas ficaram entre 0,12 e 0,28 de palavras em comum, e
 evidências da reunião longa, que não têm nada a ver com esta, chegaram a 0,30.
 Nenhum limiar separa as duas, e "48 horas úteis" casou com a frase errada. A causa
 é a consolidação ver só os resumos.
+
+---
+
+## Quarta rodada — 2026-10-09
+
+**O score saturava, e a culpa era da fórmula.** Medido sobre 198 análises:
+oportunidade com mediana 90, 65% em 90 ou mais e 42 reuniões em exatamente 100;
+churn com 25 em 100. Os três códigos de oportunidade mais comuns somavam
+20 + 40 + 30 = 90 na soma reta, e como os códigos são unidos entre os chunks
+(`_motives_for`), a mediana acompanhava o tamanho da reunião: 20 com um chunk, 90
+a partir do terceiro. Recalculando a soma a partir dos códigos gravados, a
+distribuição gravada se reproduz — o número do modelo já era descartado, então o
+defeito era aritmético, não do modelo.
+
+**Duas mudanças na fórmula** (`scoring_service._score`):
+
+- **Peso por evidência.** O código vale cheio quando aparece em pelo menos 25%
+  dos chunks da reunião ou quando as regras de `motive_rules.py` confirmam uma
+  citação literal; menção única em reunião longa vale metade. Um corte seco (só
+  conta acima de 25%) foi simulado e calou sinal real: os zeros de churn subiam de
+  49 para 84.
+- **Retorno decrescente a partir do terceiro código.** Os dois maiores entram
+  cheios, o terceiro pela metade, o quarto a um quarto. A versão sem o peso por
+  evidência comprimia tudo entre 40 e 64.
+
+Simulado sobre as mesmas 201 análises, sem LLM (`scripts/score_sim.py`):
+
+| Régua | Oportunidade | Churn |
+|---|---|---|
+| soma reta (antes) | mediana 90, 129 ≥ 90, 42 em 100 | mediana 30, 25 em 100 |
+| nova fórmula, pesos de hoje | mediana 79, 0 ≥ 90, 0 em 100, 10 zeros | mediana 28, 5 ≥ 90, 0 em 100, 65 zeros |
+| nova fórmula, pesos do plano | mediana 53, 0 ≥ 90, 10 zeros | mediana 20, 0 ≥ 90, 65 zeros |
+
+**Os pesos saíram do código para o banco.** `ai.scoring_weights` (migração 0010)
+guarda pontos, nome de tela e descrição por código, com um contador de versão
+compartilhado que sobe a cada salvamento e é gravado junto do score
+(`risco_churn.versao_regua`). A migração popula com os valores que já estavam no
+código, então nada mudou de peso no dia da subida — a mudança de número vem da
+fórmula. `GET/PUT /scoring` na IA, `/api/dashboard/scoring` no backend (salvar é
+só do `SALES_DIRECTOR`), e `POST /scoring/simulate` devolve a distribuição que
+uma régua proposta daria sobre as análises já gravadas, sem gravar e sem LLM.
+
+**O piso de enumeração continua em 5, nos dois lados.** O plano previa baixá-lo
+para 4 na oportunidade, porque quatro códigos já estouravam 100; com o retorno
+decrescente quatro códigos dão 88 e o teto não é mais automático, então o piso
+de 4 passaria a descartar uma leitura legítima de quatro códigos já medida
+(expansão + verba + prazo + interesse, todos no texto). Fica como está até o
+conjunto rotulado dizer qual dos dois erra menos.
+
+**Apertar a definição de `INTERESSE_NOVO_MODULO` no catálogo (#3) não mudou nada
+mensurável, e o texto voltou ao que era.** O código vinha declarado em 76% dos
+chunks, o que o tornava quase constante, e a hipótese era que uma definição
+exigindo o pedido do cliente derrubaria isso. Três catálogos sobre os mesmos 20
+chunks sorteados do corpus, `qwen3.5:4b-q4_K_M`, `temperature=0`:
+
+| Catálogo | Declarou o código |
+|---|---|
+| o de produção | 11 de 20 (55%) |
+| exigindo o pedido do cliente | 10 de 20 (50%) |
+| idem, com proibição explícita e "na dúvida, não declare" | 9 de 20 (45%) |
+
+Nos mesmos 20 chunks, o banco tem 14 (70%) — ou seja, o **próprio** prompt de
+produção, rodando de novo, declarou 15 pontos menos do que havia gravado. Numa
+rodada anterior sobre 12 chunks que tinham o código, o prompt de produção
+re-declarou 8: cerca de um terço de variação entre rodadas no mesmo código, com
+`temperature=0`. A diferença entre os três textos é menor que a variação do modelo
+consigo mesmo, e separar 55% de 45% com confiança exigiria centenas de chunks de
+GPU.
+
+A lição é sobre método: 76% medido numa passada não é um alvo estável para
+calibrar prompt. A alavanca que funciona neste código é o peso — 20 para 5 na
+tabela, editável na tela, com efeito determinístico e visível no simulador — mais
+o peso por evidência, que já faz uma menção única valer metade.
