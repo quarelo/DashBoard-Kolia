@@ -389,3 +389,12 @@ export interface MotiveWeightInput {
   name?: string;
   description?: string;
 }
+
+/** Agregados públicos da landing (`GET /api/public/stats`), sem nome de ninguém. */
+export interface PublicStats {
+  reunioesAnalisadas: number;
+  riscosDetectados: number;
+  oportunidadesDetectadas: number;
+  produtosCitados: number;
+  corteScore: number;
+}

@@ -15,6 +15,7 @@ import type {
   ProductMeetings,
   ProductQualityMetric,
   ProductQualityProfile,
+  PublicStats,
   SentimentClass,
 } from "../types";
 
@@ -464,4 +465,22 @@ export function formatDuration(minutes: number): string {
   const hours = Math.floor(rounded / 60);
   const rest = rounded % 60;
   return rest === 0 ? `${hours}h` : `${hours}h ${rest}min`;
+}
+
+/** Números da landing. Sem token: a página inicial não tem sessão. */
+export async function publicStats(): Promise<PublicStats> {
+  const raw = await apiRequest<{
+    reunioes_analisadas: number;
+    riscos_detectados: number;
+    oportunidades_detectadas: number;
+    produtos_citados: number;
+    corte_score: number;
+  }>("/api/public/stats", { auth: false });
+  return {
+    reunioesAnalisadas: raw.reunioes_analisadas,
+    riscosDetectados: raw.riscos_detectados,
+    oportunidadesDetectadas: raw.oportunidades_detectadas,
+    produtosCitados: raw.produtos_citados,
+    corteScore: raw.corte_score,
+  };
 }
