@@ -9,6 +9,7 @@ import { Products } from "./pages/Products";
 import { ProductDetail } from "./pages/ProductDetail";
 import { Insights } from "./pages/Insights";
 import { Chat } from "./pages/Chat";
+import { Settings } from "./pages/Settings";
 import { AppLayout } from "./components/layout/AppLayout";
 import { ProtectedRoute } from "./components/auth/ProtectedRoute";
 import { AuthProvider } from "./context/AuthContext";
@@ -31,6 +32,7 @@ export default function App() {
               <Route path="products/:nome" element={<ProductDetail />} />
               <Route path="insights" element={<Insights />} />
               <Route path="chat" element={<Chat />} />
+              <Route path="settings" element={<Settings />} />
             </Route>
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

@@ -29,7 +29,7 @@ backend/
 ├── routers/
 │   ├── auth.py              # /register, /login, /me
 │   ├── meetings.py          # /api/imports, /api/meetings (import, versions, analysis)
-│   └── dashboard.py         # /api/dashboard (overview, executive, meetings, delete, chat)
+│   └── dashboard.py         # /api/dashboard (overview, executive, meetings, delete, chat, scoring)
 ├── services/
 │   ├── meeting_parser.py    # CSV/JSON validation; MAX_IMPORT_BYTES / MAX_IMPORT_ROWS
 │   ├── meeting_import_service.py  # dedup, versioning, persistence

@@ -127,6 +127,9 @@ reunião.
 | `GET /analises/{id}/conversas/{conversation_id}` | mensagens de uma conversa |
 | `POST /analises/{id}/chat` | nova pergunta; sem `conversation_id`, começa uma conversa |
 | `GET /analises/{id}/chat` | mensagens da conversa mais recente |
+| `GET /scoring` | pesos, nomes e frequência real de cada motivo |
+| `PUT /scoring` | salva os pesos e devolve a versão nova da régua |
+| `POST /scoring/simulate` | distribuição que uma régua daria sobre as análises gravadas, sem gravar |
 
 As estimativas vêm do histórico desta máquina. Elas usam a mediana por número de
 chunks, sem uma reta única, e mudam depois de uma troca de modelo ou de hardware.

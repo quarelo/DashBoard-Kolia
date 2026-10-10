@@ -5,6 +5,7 @@ import pytest
 from src.app.services.scoring_service import (
     ChurnMotive,
     OpportunityMotive,
+    Ruler,
     calculate_churn_risk,
     calculate_opportunity_score,
 )
@@ -35,23 +36,36 @@ class TestChurnRiskDeterminism:
         assert calculate_churn_risk([ChurnMotive.RECLAMACAO_PRODUTO.value]).score == 15
         assert calculate_churn_risk([ChurnMotive.INATIVIDADE_PROLONGADA.value]).score == 10
 
-        # Multiple motives: sum is 50 + 30 + 25 = 105, capped at 100
+        # From the third code on the weight is discounted, so three codes are
+        # 50 + 30 + 25/2 = 92.5, not the 105 that used to be capped at 100.
         assert calculate_churn_risk([
             ChurnMotive.AMEACA_CANCELAMENTO.value,
             ChurnMotive.INSATISFACAO_EXPLICITA.value,
             ChurnMotive.MENCAO_CONCORRENTE.value,
-        ]).score == 100
+        ]).score == 93
+
+    def test_the_whole_catalogue_no_longer_reaches_the_ceiling(self):
+        """Listing every code was the cheapest way to score 100, and it should not be.
+
+        All five churn codes used to sum to 130 and cap at 100; with the discount
+        they reach 98, and the ceiling now needs weights that justify it.
+        """
+        result = calculate_churn_risk([motive.value for motive in ChurnMotive])
+        assert result.score == 98
 
     def test_score_capped_at_100(self):
-        """Score must never exceed 100 even when sum of motives does."""
-        # Sum: 50 + 30 + 25 + 15 = 120
-        result = calculate_churn_risk([
-            ChurnMotive.AMEACA_CANCELAMENTO.value,
-            ChurnMotive.INSATISFACAO_EXPLICITA.value,
-            ChurnMotive.MENCAO_CONCORRENTE.value,
-            ChurnMotive.RECLAMACAO_PRODUTO.value,
-        ])
+        """Score must never exceed 100, whatever weights the ruler carries."""
+        heavy = Ruler(version=7, points={
+            ChurnMotive.AMEACA_CANCELAMENTO.value: 90,
+            ChurnMotive.INSATISFACAO_EXPLICITA.value: 80,
+        })
+        result = calculate_churn_risk(
+            [ChurnMotive.AMEACA_CANCELAMENTO.value,
+             ChurnMotive.INSATISFACAO_EXPLICITA.value],
+            weights=heavy,
+        )
         assert result.score == 100
+        assert result.ruler_version == 7
 
     def test_duplicate_motives_count_once(self):
         """Same motive listed multiple times should count only once."""
@@ -123,23 +137,26 @@ class TestOpportunityScoringDeterminism:
         assert calculate_opportunity_score([OpportunityMotive.INTERESSE_NOVO_MODULO.value]).score == 20
         assert calculate_opportunity_score([OpportunityMotive.ELOGIO_CLIENTE.value]).score == 15
 
-        # Multiple motives: sum is 40 + 30 + 25 = 95
+        # Third code at half: 40 + 30 + 25/2 = 82.5.
         assert calculate_opportunity_score([
             OpportunityMotive.PEDIDO_EXPANSAO.value,
             OpportunityMotive.MENCAO_BUDGET.value,
             OpportunityMotive.PRAZO_DEFINIDO.value,
-        ]).score == 95
+        ]).score == 83
 
-    def test_score_capped_at_100(self):
-        """Score must never exceed 100 even when sum of motives does."""
-        # Sum: 40 + 30 + 25 + 20 = 115
+    def test_four_codes_no_longer_land_on_the_ceiling(self):
+        """The commonest four used to sum to 115 and cap at 100.
+
+        42 of 198 analyses sat at exactly 100 because of this, which is what made
+        the number useless for ranking.
+        """
         result = calculate_opportunity_score([
             OpportunityMotive.PEDIDO_EXPANSAO.value,
             OpportunityMotive.MENCAO_BUDGET.value,
             OpportunityMotive.PRAZO_DEFINIDO.value,
             OpportunityMotive.INTERESSE_NOVO_MODULO.value,
         ])
-        assert result.score == 100
+        assert result.score == 88
 
     def test_duplicate_motives_count_once(self):
         """Same motive listed multiple times should count only once."""
@@ -283,7 +300,8 @@ class TestEnumeratedCodesNeverScore:
 
         result = build_compact_final_summary([summary], ["origem"])
 
-        assert result["score_oportunidade"]["score"] == 100
+        # 40 + 30 + 25/2 + 20/4 = 87.5, the four codes read without the ceiling.
+        assert result["score_oportunidade"]["score"] == 88
 
     def test_a_score_and_its_reason_never_contradict(self):
         from src.app.services.analysis_service import build_compact_final_summary
@@ -302,3 +320,79 @@ class TestEnumeratedCodesNeverScore:
                 else:
                     assert bloco["justificativa"].startswith(vazio), \
                         f"{campo}: não pontuou mas apresenta justificativa"
+
+
+class TestEvidenceWeight:
+    """Um código tem que valer pelo que sustenta, não por aparecer.
+
+    Medido em 2026-10-09: a oportunidade mediana era 20 com um chunk e 90 a partir
+    do terceiro, porque os códigos são unidos entre os chunks e uma menção única
+    numa reunião longa pesava igual à reunião inteira falando do assunto.
+    """
+
+    def test_a_single_mention_in_a_long_meeting_counts_half(self):
+        full = calculate_opportunity_score(
+            [OpportunityMotive.PEDIDO_EXPANSAO.value],
+            evidence={OpportunityMotive.PEDIDO_EXPANSAO.value: 0.5},
+        ).score
+        thin = calculate_opportunity_score(
+            [OpportunityMotive.PEDIDO_EXPANSAO.value],
+            evidence={OpportunityMotive.PEDIDO_EXPANSAO.value: 0.05},
+        ).score
+        assert full == 40
+        assert thin == 20
+
+    def test_a_quarter_of_the_chunks_is_already_full_weight(self):
+        result = calculate_opportunity_score(
+            [OpportunityMotive.PEDIDO_EXPANSAO.value],
+            evidence={OpportunityMotive.PEDIDO_EXPANSAO.value: 0.25},
+        )
+        assert result.score == 40
+
+    def test_the_score_does_not_grow_with_the_number_of_chunks(self):
+        """O mesmo sinal, dito uma vez, não pode valer mais numa reunião longa."""
+        from src.app.services.analysis_service import build_compact_final_summary
+
+        declared = {"pontos_chave": ["OPORTUNIDADE: querem ampliar para novas lojas"],
+                    "motivos_churn": [],
+                    "motivos_oportunidade": [OpportunityMotive.PEDIDO_EXPANSAO.value]}
+        quiet = {"pontos_chave": ["PRODUTO: TOTVS ERP"],
+                 "motivos_churn": [], "motivos_oportunidade": []}
+
+        short = build_compact_final_summary([declared])["score_oportunidade"]["score"]
+        long = build_compact_final_summary(
+            [declared] + [quiet] * 9)["score_oportunidade"]["score"]
+        assert short >= long, "reunião longa não pode pontuar mais pelo tamanho"
+
+    def test_a_quote_the_rules_confirm_counts_whole_however_long_the_meeting(self):
+        """A citação literal é prova mais forte que a repetição.
+
+        Senão o corte por frequência calaria sinal real: simulado, os zeros de
+        churn subiam de 49 para 84.
+        """
+        from src.app.services.analysis_service import build_compact_final_summary
+
+        threat = {"pontos_chave": ["CHURN: o cliente disse que vamos rescindir o contrato"],
+                  "motivos_churn": [ChurnMotive.AMEACA_CANCELAMENTO.value],
+                  "motivos_oportunidade": []}
+        quiet = {"pontos_chave": ["PRODUTO: TOTVS ERP"],
+                 "motivos_churn": [], "motivos_oportunidade": []}
+
+        result = build_compact_final_summary([threat] + [quiet] * 19)
+        assert result["risco_churn"]["score"] == 50
+
+
+class TestRulerVersionTravelsWithTheScore:
+    def test_the_score_records_which_ruler_measured_it(self):
+        from src.app.services.analysis_service import build_compact_final_summary
+
+        heavy = Ruler(version=9, points={ChurnMotive.AMEACA_CANCELAMENTO.value: 10})
+        result = build_compact_final_summary(
+            [{"pontos_chave": ["CHURN: cliente falou em rescindir o contrato"],
+              "motivos_churn": [ChurnMotive.AMEACA_CANCELAMENTO.value],
+              "motivos_oportunidade": []}],
+            weights=heavy,
+        )
+        assert result["risco_churn"]["score"] == 10
+        assert result["risco_churn"]["versao_regua"] == 9
+        assert result["score_oportunidade"]["versao_regua"] == 9

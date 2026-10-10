@@ -47,6 +47,21 @@ def _sqlite_text_search_stubs(dbapi_connection, _record):
         "to_tsvector", 2, lambda _config, text: text, deterministic=True)
 
 
+@pytest.fixture(autouse=True)
+def _clean_scoring_ruler():
+    """The weight table is cached per process, so a test must not inherit it.
+
+    `scoring_service.ruler()` keeps the ruler in memory on purpose — it is read
+    once per analysis run — and a test that loads a ruler would otherwise leave it
+    in place for every test that scores afterwards.
+    """
+    from src.app.services.scoring_service import invalidate_ruler
+
+    invalidate_ruler()
+    yield
+    invalidate_ruler()
+
+
 @pytest.fixture
 def sqlite_db():
     """An empty in-memory session.

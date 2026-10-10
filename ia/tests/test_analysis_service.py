@@ -39,16 +39,15 @@ class FakeSession:
             None,
         )
 
-    def execute(self, _statement):
-        chunks = sorted(
-            (
-                value
-                for value in self.added
-                if isinstance(value, MeetingChunk)
-            ),
-            key=lambda chunk: chunk.chunk_index,
-        )
-        return FakeResult(chunks)
+    def execute(self, statement):
+        # Pelo tipo que a consulta pede, não só por chunk: o pipeline também lê
+        # `ScoringWeight` para carregar a régua de pontuação, e devolver chunks
+        # para qualquer consulta quebrava isso com um AttributeError.
+        model = statement.column_descriptions[0]["entity"]
+        values = [value for value in self.added if isinstance(value, model)]
+        if model is MeetingChunk:
+            values.sort(key=lambda chunk: chunk.chunk_index)
+        return FakeResult(values)
 
 
 class FakeResult:
