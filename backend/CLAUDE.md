@@ -71,6 +71,19 @@ There are no `__init__.py` files — modules import each other with flat paths (
 - `GET /meetings/{analysis_id}/chat/conversations`, `GET /meetings/{analysis_id}/chat/conversations/{conversation_id}` and `POST /meetings/{analysis_id}/chat` proxy the IA's chat. A meeting can have several conversations (`ai.chat_conversations`, messages in `ai.chat_messages`); a question without `conversation_id` starts a new one, and the answer carries its id. `GET /meetings/{analysis_id}/chat` still returns the latest conversation.
 - `DELETE /meetings/{analysis_id}` is the one place the backend writes to schema `ai`: see "Serviços" in the root `CLAUDE.md`. A `USER` deletes meetings they imported, a `SALES_DIRECTOR` any; an analysis still processing answers `409 ANALYSIS_IN_PROGRESS`.
 
+## Rota pública
+
+`GET /api/public/stats` (`routers/public.py`) é a única leitura sem token, e
+existe porque a landing não tem sessão: ela trazia "500+ reuniões", "R$ 3.2M de
+pipeline" e "87% de precisão" escritos no HTML, números que não saíam de lugar
+nenhum. A rota devolve quatro contagens sobre `ai.meeting_analyses` — reuniões
+analisadas, reuniões com risco e com oportunidade acima de `HIGH_SCORE` (70, o
+mesmo corte dos dois lados) e produtos distintos citados. Nenhum nome, nenhum
+título, nenhum texto de transcrição sai por aqui, e precisa continuar assim.
+
+O `score` é JSON: o SQL filtra por `~ '^[0-9]+$'` antes do cast, senão um resumo
+antigo sem o campo derruba a página inteira com erro de conversão.
+
 ## Auth flow
 
 - Routes are at the root, with no `/auth` prefix: `/register`, `/login`, `/me` (`/auth/register` answers 404).

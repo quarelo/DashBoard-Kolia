@@ -9,6 +9,7 @@ from core.upload_limit import ImportBodyLimitMiddleware
 from routers.auth import router as auth_router
 from routers.dashboard import router as dashboard_router
 from routers.meetings import router as meetings_router
+from routers.public import router as public_router
 
 
 @asynccontextmanager
@@ -24,6 +25,7 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins,
 app.include_router(auth_router)
 app.include_router(meetings_router)
 app.include_router(dashboard_router)
+app.include_router(public_router)
 
 
 @app.get("/health")
