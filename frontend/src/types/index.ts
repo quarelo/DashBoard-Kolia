@@ -340,3 +340,52 @@ export interface ChatMessage {
   citations?: ChatCitation[];
   grounded?: boolean;
 }
+
+/* ── Régua de pontuação (pesos editáveis de churn e oportunidade) ────── */
+
+/** Qual score o motivo alimenta. O código é chave e nunca muda; o nome, sim. */
+export type MotiveSide = "CHURN" | "OPPORTUNITY";
+
+export interface MotiveWeight {
+  code: string;
+  side: MotiveSide;
+  name: string;
+  description: string;
+  points: number;
+  /** Em quantas reuniões analisadas este motivo apareceu. */
+  meetings: number;
+  /** A mesma contagem como fração do total — calibrar sem ela é calibrar no escuro. */
+  frequency: number;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+export interface ScoringRuler {
+  /** Sobe a cada salvamento; fica gravada junto do score de cada reunião. */
+  ruler_version: number;
+  analysed_meetings: number;
+  /** Lados em que os dois maiores pesos já somam mais de 100 — a causa da saturação. */
+  saturated_sides: MotiveSide[];
+  motives: MotiveWeight[];
+}
+
+export interface ScoreDistribution {
+  count: number;
+  median: number | null;
+  mean: number | null;
+  at_100: number | null;
+  at_least_90: number | null;
+  zeros: number | null;
+}
+
+export interface ScoringSimulation {
+  churn: ScoreDistribution;
+  opportunity: ScoreDistribution;
+}
+
+export interface MotiveWeightInput {
+  code: string;
+  points: number;
+  name?: string;
+  description?: string;
+}

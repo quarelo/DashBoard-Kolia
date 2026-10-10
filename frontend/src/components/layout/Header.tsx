@@ -47,7 +47,11 @@ export function Header() {
         </button>
 
         {/* Settings */}
-        <button className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors">
+        <button
+          onClick={() => navigate("/app/settings")}
+          title="Configurações"
+          className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+        >
           <Settings size={17} />
         </button>
 

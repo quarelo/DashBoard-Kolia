@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from core.auth import get_current_user
 from core.database import get_db
 from models.user import UserModel
+from schemas.user import RoleEnum
 from services import analysis_read
 from services.ia_gateway import get_ia_client, readiness
 from services.meeting_deletion import delete_meeting
@@ -370,3 +371,71 @@ def dashboard_meeting_chat(
         raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "A IA não respondeu. Tente novamente."})
 
     return response.json()
+
+
+def _ia_write(client: httpx.Client, method: str, path: str, body: dict) -> dict:
+    try:
+        response = client.request(method, path, json=body)
+    except httpx.HTTPError as error:
+        raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "Serviço de IA indisponível."}) from error
+    if response.status_code in (401, 403):
+        raise HTTPException(502, {"code": "IA_AUTH_FAILED", "message": "A IA recusou a autenticação do backend."})
+    if response.status_code == 422:
+        raise HTTPException(422, _ia_detail(response, "Pesos inválidos."))
+    if response.status_code >= 500:
+        raise HTTPException(503, {"code": "IA_UNAVAILABLE", "message": "A IA não respondeu. Tente novamente."})
+    return response.json()
+
+
+def _scoring_payload(payload: dict, user: UserModel) -> dict:
+    """Valida o corpo da tela de pesos antes de gastar uma chamada na IA."""
+    motives = payload.get("motives")
+    if not isinstance(motives, list) or not 1 <= len(motives) <= 50:
+        raise HTTPException(422, "Envie de 1 a 50 motivos.")
+    body = []
+    for item in motives:
+        if not isinstance(item, dict) or not isinstance(item.get("code"), str):
+            raise HTTPException(422, "Motivo sem código.")
+        points = item.get("points")
+        # bool é int em Python, e `True` viraria 1 ponto sem este teste.
+        if isinstance(points, bool) or not isinstance(points, int) or not 0 <= points <= 100:
+            raise HTTPException(422, f"Pontos de {item['code']} devem estar entre 0 e 100.")
+        entry = {"code": item["code"], "points": points}
+        for field in ("name", "description"):
+            value = item.get(field)
+            if isinstance(value, str) and value.strip():
+                entry[field] = value.strip()
+        body.append(entry)
+    return {"motives": body, "updated_by": user.email}
+
+
+@router.get("/scoring")
+def dashboard_scoring(
+    _user: UserModel = Depends(get_current_user),
+    client: httpx.Client = Depends(get_ia_client),
+):
+    """Pesos, nomes e frequência real de cada motivo de churn e oportunidade."""
+    return _ia_get(client, "/scoring")
+
+
+@router.post("/scoring/simulate")
+def dashboard_scoring_simulate(
+    payload: dict = Body(...),
+    user: UserModel = Depends(get_current_user),
+    client: httpx.Client = Depends(get_ia_client),
+):
+    """A distribuição que a régua proposta daria, sem salvar e sem reprocessar."""
+    return _ia_write(client, "POST", "/scoring/simulate",
+                     _scoring_payload(payload, user))
+
+
+@router.put("/scoring")
+def dashboard_scoring_update(
+    payload: dict = Body(...),
+    user: UserModel = Depends(get_current_user),
+    client: httpx.Client = Depends(get_ia_client),
+):
+    """Salva a régua. Só o diretor comercial: o peso move o score de toda reunião nova."""
+    if user.role != RoleEnum.SALES_DIRECTOR:
+        raise HTTPException(403, "Apenas o diretor comercial pode alterar a pontuação.")
+    return _ia_write(client, "PUT", "/scoring", _scoring_payload(payload, user))
