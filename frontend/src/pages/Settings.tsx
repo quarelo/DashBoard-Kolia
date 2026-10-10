@@ -152,10 +152,14 @@ export function Settings() {
                     {" "}({motive.meetings} de {data.analysed_meetings})
                   </p>
                 </div>
-                <label className="flex items-center gap-2 flex-shrink-0">
-                  <span className="sr-only">Pontos de {motive.name}</span>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {/* `sr-only` é `position:absolute`, e sem ancestral posicionado ele se
+                      ancora no documento: dentro do `<main>` que rola, os rótulos ficavam
+                      em coordenadas abaixo da dobra e esticavam a altura da página, o que
+                      punha uma faixa branca sob o app inteiro. `aria-label` não ocupa caixa. */}
                   <input
                     type="number"
+                    aria-label={`Pontos de ${motive.name}`}
                     min={0}
                     max={100}
                     value={current(motive)}
@@ -172,7 +176,7 @@ export function Settings() {
                     style={{ "--tw-ring-color": "rgba(231,107,56,0.25)" } as React.CSSProperties}
                   />
                   <span className="text-xs text-ink-muted w-10">pontos</span>
-                </label>
+                </div>
               </li>
             ))}
           </ul>
