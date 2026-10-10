@@ -104,10 +104,17 @@ class TestOpportunity:
         """Unlike churn, a stated figure or date is a fact regardless of framing."""
         assert "PRAZO_DEFINIDO" in opportunity_motives("se aprovarem, entregamos em 30 dias")
 
-    def test_score_is_capped_at_one_hundred(self):
+    def test_every_signal_at_once_no_longer_hits_the_ceiling(self):
+        """Five signals used to sum to 130 and cap at 100.
+
+        That is the saturation the discount exists to remove: 40 + 30 + 25/2 +
+        20/4 + 15/8 = 89.4. The number still has room above it for a ruler that
+        weighs a rare signal heavier.
+        """
         text = ("orçamento de R$ 40 mil, entrega em 30 dias, querem fazer teste, "
                 "ampliar para novas lojas, atendeu super bem")
-        assert calculate_opportunity_score(opportunity_motives(text)).score == 100
+        assert len(opportunity_motives(text)) == 5
+        assert calculate_opportunity_score(opportunity_motives(text)).score == 89
 
 
 class TestDeterminism:

@@ -30,8 +30,10 @@ from src.app.services.llm_service import (
 from src.app.services.motive_rules import churn_motives, opportunity_motives
 from src.app.services.product_service import ground_products
 from src.app.services.scoring_service import (
+    Ruler,
     calculate_churn_risk,
     calculate_opportunity_score,
+    ruler,
 )
 from src.app.services.token_service import count_tokens, split_text_by_tokens
 
@@ -544,8 +546,29 @@ def _motives_for(
     return [code for fact in facts for code in from_text(fact)]
 
 
+def _evidence_shares(
+    chunk_summaries: list[dict], key: str, codes: list[str], confirmed: set[str],
+) -> dict[str, float]:
+    """Share of the meeting's chunks that declare each code.
+
+    It is what tells "the meeting is about this" from "someone said it once in
+    chunk 14 of 20": the codes are unioned across chunks, so a single mention used
+    to weigh the same as the whole conversation. A code the rules confirmed against
+    a literal quote counts as full evidence regardless of share — the quote is
+    stronger proof than repetition.
+    """
+    total = len(chunk_summaries) or 1
+    return {
+        code: 1.0 if code in confirmed else sum(
+            1 for summary in chunk_summaries if code in (summary.get(key) or [])
+        ) / total
+        for code in codes
+    }
+
+
 def build_compact_final_summary(
-    chunk_summaries: list[dict], source_texts: list[str] | None = None
+    chunk_summaries: list[dict], source_texts: list[str] | None = None,
+    *, weights: Ruler | None = None,
 ) -> dict:
     grouped = {
         "PRODUTO": [], "PERSONA": [], "SENTIMENTO": [], "CHURN": [],
@@ -602,8 +625,6 @@ def build_compact_final_summary(
         chunk_summaries, "motivos_churn", filtered_churn_facts, churn_motives,
     )
 
-    churn_risk = calculate_churn_risk(all_churn_motives)
-
     # Calculate opportunity score using deterministic scoring
     opportunities = _select_critical_facts(grouped["OPORTUNIDADE"], 3)
 
@@ -611,15 +632,31 @@ def build_compact_final_summary(
         chunk_summaries, "motivos_oportunidade", opportunities, opportunity_motives,
     )
 
-    opportunity_score = calculate_opportunity_score(all_opportunity_motives)
-
     # The justification has to come from whatever produced the score. Reading it
     # only from rule-matched facts left "score 30" next to "nenhum sinal
     # identificado" whenever the codes came from the model instead of the rules.
+    # The same lists say which codes have a literal quote behind them, which is
+    # what makes a code count whole in the score.
     churn_signals = [fact for fact in filtered_churn_facts
                      if churn_motives(fact)][:3]
     opportunity_signals = [fact for fact in opportunities
                            if opportunity_motives(fact)][:3]
+    confirmed_churn = {code for fact in filtered_churn_facts
+                       for code in churn_motives(fact)}
+    confirmed_opportunity = {code for fact in opportunities
+                             for code in opportunity_motives(fact)}
+
+    table = weights or ruler()
+    churn_risk = calculate_churn_risk(
+        all_churn_motives, weights=table,
+        evidence=_evidence_shares(chunk_summaries, "motivos_churn",
+                                  all_churn_motives, confirmed_churn),
+    )
+    opportunity_score = calculate_opportunity_score(
+        all_opportunity_motives, weights=table,
+        evidence=_evidence_shares(chunk_summaries, "motivos_oportunidade",
+                                  all_opportunity_motives, confirmed_opportunity),
+    )
     if all_churn_motives and not churn_signals:
         churn_signals = [MOTIVE_LABELS.get(code, code) for code in all_churn_motives[:3]]
 
@@ -674,6 +711,9 @@ def build_compact_final_summary(
         },
         "risco_churn": {
             "score": churn_risk.score,
+            # A régua que produziu o número, para que dois scores do dashboard
+            # continuem comparáveis depois de alguém mexer nos pesos.
+            "versao_regua": churn_risk.ruler_version,
             "justificativa": _score_reason(
                 churn_risk.score, churn_signals, all_churn_motives,
                 "Nenhum sinal explícito identificado."),
@@ -682,6 +722,7 @@ def build_compact_final_summary(
         "oportunidade_comercial": clean_card_items(opportunities),
         "score_oportunidade": {
             "score": opportunity_score.score,
+            "versao_regua": opportunity_score.ruler_version,
             # Same rule as churn: the sentence has to come from whatever produced
             # the number. Listing opportunity facts next to a zero read as an
             # opportunity nobody scored, which is a contradiction on the card.
@@ -870,6 +911,10 @@ def process_analysis_summaries(
     analysis = db.get(MeetingAnalysis, analysis_id)
     if analysis is None:
         raise ValueError(f"Análise não encontrada: {analysis_id}")
+
+    # Warms the weight cache while a session is open: the scoring below runs deep
+    # inside pure functions that have no database of their own.
+    ruler(db)
 
     try:
         analysis.status = "ANALYZING"

@@ -11,6 +11,9 @@ from src.app.core.config import settings
 from src.app.core.database import SessionLocal, get_db, init_database
 from src.app.core.security import verify_token
 from src.app.models.analysis import MeetingAnalysis, MeetingChunk
+from src.app.schemas.scoring import (
+    ScoringRulerResponse, ScoringRulerUpdate, ScoringSimulationResponse,
+)
 from src.app.schemas.analysis import (
     AnalysisDetailResponse, AnalyzeRequest, AnalyzeResponse, ChunkResponse,
     SemanticSearchRequest, SemanticSearchResponse,
@@ -26,6 +29,9 @@ from src.app.services.llm_service import (
 from src.app.services.analysis_worker import AnalysisWorker
 from src.app.services.analysis_submission import SubmissionConflict, submit_idempotent
 from src.app.services.eta_service import estimate_analysis, estimate_backlog, estimate_batch
+from src.app.services.scoring_config_service import (
+    UnknownMotiveError, list_weights, save_weights, simulate,
+)
 from src.app.services.chat_service import (
     answer_analysis_question, conversation_history, get_conversation,
     list_conversations, load_conversation, persist_turn,
@@ -395,3 +401,46 @@ def chat_with_analysis(
             status_code=503,
             detail="Chat temporariamente indisponível.",
         ) from error
+
+
+@app.get("/scoring", response_model=ScoringRulerResponse,
+         dependencies=[Depends(verify_token)])
+def scoring_ruler(db: Session = Depends(get_db)):
+    """Os pesos em vigor, com o nome de tela e a frequência real de cada motivo."""
+    return list_weights(db)
+
+
+@app.put("/scoring", response_model=ScoringRulerResponse,
+         dependencies=[Depends(verify_token)])
+def update_scoring_ruler(payload: ScoringRulerUpdate, db: Session = Depends(get_db)):
+    """Salva os pesos e devolve a régua nova, com a versão incrementada.
+
+    Não recalcula análise antiga: o score gravado é o número com que a reunião foi
+    medida, e a versão da régua guardada junto dele é o que diz com qual.
+    """
+    try:
+        return save_weights(
+            db,
+            [item.model_dump() for item in payload.motives],
+            payload.updated_by,
+        )
+    except UnknownMotiveError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/scoring/simulate", response_model=ScoringSimulationResponse,
+          dependencies=[Depends(verify_token)])
+def simulate_scoring_ruler(payload: ScoringRulerUpdate, db: Session = Depends(get_db)):
+    """A distribuição que esta régua daria sobre as análises já gravadas.
+
+    Não grava nada e não chama o modelo: lê os motivos dos `chunk_summary` que já
+    existem. É o que permite calibrar um peso sem reprocessar reunião.
+    """
+    current = {item["code"]: item["points"] for item in list_weights(db)["motives"]}
+    unknown = [item.code for item in payload.motives if item.code not in current]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Código desconhecido: {', '.join(sorted(unknown))}")
+    return simulate(db, {**current,
+                         **{item.code: item.points for item in payload.motives}})
