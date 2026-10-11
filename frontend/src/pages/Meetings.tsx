@@ -9,6 +9,7 @@ import { DeleteMeetingDialog } from "../components/meetings/DeleteMeetingDialog"
 import { dashboardService, sentimentLabels, sentimentTone, statusLabel } from "../services/dashboardService";
 import { PageError, PageLoader, EmptyState } from "../components/ui/PageState";
 import { ScoreBar } from "../components/ui/ScoreBar";
+import { Pagination } from "../components/ui/Pagination";
 import type { AnalysisListItem, SentimentClass } from "../types";
 import { cn } from "../lib/utils";
 
@@ -129,8 +130,20 @@ function StatCard({ label, value, sub, color }: { label: string; value: string |
   );
 }
 
+// A tela pedia 200 itens de uma vez, que é o teto do `limit` no backend
+// (`routers/dashboard.py`). Com 303 análises no banco, todo número daqui
+// congelava em 200 — inclusive "Risco Alto" e a média, que passavam a descrever
+// só as 200 primeiras. A lista agora vem por página e os totais vêm do
+// /overview, que soma no SQL sobre a tabela inteira.
+const PAGE_SIZE = 50;
+
 export function Meetings() {
-  const { data, loading, error, reload } = useAsync(() => dashboardService.list(0, 200), []);
+  const overview = useAsync(() => dashboardService.overview(), []);
+  const [page, setPage] = useState(0);
+  const { data, loading, error, reload } = useAsync(
+    () => dashboardService.list(page * PAGE_SIZE, PAGE_SIZE),
+    [page],
+  );
   const [search, setSearch] = useState("");
   const [sentimentFilter, setSentimentFilter] = useState("all");
   const [sortField, setSortField] = useState<"date" | "riskScore" | "opportunityScore">("date");
@@ -172,27 +185,33 @@ export function Meetings() {
     else { setSortField(field); setSortDir("desc"); }
   }
 
-  if (loading) return <PageLoader label="Carregando reuniões..." />;
+  // Só a primeira carga toma a tela: trocar de página mantém cabeçalho e filtros.
+  if (loading && !data) return <PageLoader label="Carregando reuniões..." />;
   if (error || !data) return <PageError message={error ?? "Sem dados."} onRetry={reload} />;
 
-  const analyzed = items.filter((m) => m.summaryIsFinal || m.status === "DONE").length;
-  const highRisk = items.filter((m) => m.riskScore >= 67).length;
-  const avgRisk = items.length ? Math.round(items.reduce((s, m) => s + m.riskScore, 0) / items.length) : 0;
+  const total = data.total;
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const stats = overview.data;
 
   return (
     <div className="space-y-5">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Reuniões</h1>
         <p className="text-sm text-gray-500 mt-0.5">
-          {filtered.length} de {items.length} · transcrições analisadas pela IA
+          {filtered.length} de {items.length} nesta página · {total} analisadas pela IA
         </p>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard label="Total de Reuniões" value={items.length} sub="transcrições processadas" color="text-brand" />
-        <StatCard label="Análises Concluídas" value={`${analyzed}/${items.length}`} sub="resumo final pronto" color="text-emerald-600" />
-        <StatCard label="Risco Alto" value={highRisk} sub="score ≥ 67" color="text-rose-600" />
-        <StatCard label="Risco Médio" value={avgRisk} sub="média dos scores" color="text-violet-600" />
+        <StatCard label="Total de Reuniões" value={stats?.total ?? total} sub="transcrições processadas" color="text-brand" />
+        <StatCard
+          label="Análises Concluídas"
+          value={stats ? `${stats.analyzed}/${stats.total}` : "—"}
+          sub="resumo final pronto"
+          color="text-emerald-600"
+        />
+        <StatCard label="Risco Alto" value={stats?.highRiskCount ?? "—"} sub="score ≥ 67" color="text-rose-600" />
+        <StatCard label="Risco Médio" value={stats ? Math.round(stats.avgRisk) : "—"} sub="média dos scores" color="text-violet-600" />
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-wrap gap-3 items-center">
@@ -263,6 +282,8 @@ export function Meetings() {
         </div>
       )}
 
+      <Pagination page={page} pageCount={pageCount} onPageChange={setPage} disabled={loading} />
+
       {deleting && (
         <DeleteMeetingDialog
           analysisId={deleting.analysisId}
@@ -271,6 +292,8 @@ export function Meetings() {
           onDeleted={() => {
             setRemovedIds((ids) => new Set(ids).add(deleting.analysisId));
             setDeleting(null);
+            // Os cards vêm do /overview: sem recarregar, o total some um só na lista.
+            overview.reload();
           }}
         />
       )}
