@@ -259,6 +259,35 @@ def _avg(total: float, count: int) -> float:
     return round(total / count, 1) if count else 0.0
 
 
+def _meeting_marks(final_summary: Any) -> dict[str, bool]:
+    """Se esta reunião tem reclamação, gap e elogio — uma marca por categoria.
+
+    A unidade do Gráfico de Produto é a **reunião**, não o item: "3 reuniões
+    com reclamação" diz em quantas conversas o assunto apareceu, que é o que se
+    compara entre produtos, enquanto "11 reclamações" variava sobretudo com
+    quanto a IA detalhou cada reunião. É também a unidade que
+    :func:`product_meetings` devolve no clique da barra, então o número na
+    barra e o tamanho da lista por trás dele passam a bater — o que a docstring
+    de lá já prometia.
+
+    As três marcas se sobrepõem: a mesma reunião pode ter as três, e somá-las
+    não dá um número de reuniões.
+    """
+    fs = final_summary if isinstance(final_summary, dict) else {}
+    sentimento = _summary_block(fs, "sentimento")
+    return {
+        "reclamacoes": bool(_as_list(fs.get("problemas_identificados"))),
+        "gaps": bool(_as_list(fs.get("gap_produto"))),
+        # feedback_produto não carrega polaridade própria; só conta como elogio
+        # quando o sentimento geral da reunião já foi classificado como
+        # positivo — não inferimos tom a partir do texto livre.
+        "elogios": (
+            sentimento.get("classificacao") == "positivo"
+            and bool(_as_list(fs.get("feedback_produto")))
+        ),
+    }
+
+
 def executive_overview(
     db: Session,
     *,
@@ -276,12 +305,17 @@ def executive_overview(
     Mesma fonte e os mesmos filtros de :func:`overview` — leitura pura sobre
     ``ai.meeting_analyses`` já processada pela IA, sem chamar o serviço de IA.
 
-    Uma limitação documentada: ``reclamacoes``/``gaps``/``elogios`` em
-    ``top_produtos`` só são atribuídos quando a reunião cita exatamente um
-    produto (``final_summary.produto`` com um único item). O resumo guarda
-    esses fatos no nível da reunião, não por produto, então uma reunião com
-    dois ou mais produtos citados não entra nessa contagem — é uma aproximação
-    assumida, não um dado que a IA declarou por produto.
+    ``reclamacoes``/``gaps``/``elogios`` em ``top_produtos`` contam
+    **reuniões**, não itens: em quantas reuniões daquele produto apareceu pelo
+    menos uma reclamação, pelo menos um gap, pelo menos um elogio (ver
+    :func:`_meeting_marks`). As três marcas se sobrepõem — a mesma reunião pode
+    ter as três —, então a soma delas não é um número de reuniões.
+
+    Uma limitação documentada: esses três só são atribuídos quando a reunião
+    cita exatamente um produto (``final_summary.produto`` com um único item). O
+    resumo guarda esses fatos no nível da reunião, não por produto, então uma
+    reunião com dois ou mais produtos citados não entra nessa contagem — é uma
+    aproximação assumida, não um dado que a IA declarou por produto.
     """
     extra_where, params = _build_filters(
         uf=uf, segmento=segmento, unidade=unidade, formato=formato,
@@ -304,7 +338,6 @@ def executive_overview(
         fs = row.final_summary if isinstance(row.final_summary, dict) else {}
         risco = _summary_block(fs, "risco_churn")
         oportunidade = _summary_block(fs, "score_oportunidade")
-        sentimento = _summary_block(fs, "sentimento")
         risk_score = int(_num(risco.get("score")))
         opportunity_score = int(_num(oportunidade.get("score")))
         products = _as_list(fs.get("produto"))
@@ -322,13 +355,8 @@ def executive_overview(
             stats = product_single_stats.setdefault(
                 products[0], {"reclamacoes": 0, "gaps": 0, "elogios": 0},
             )
-            stats["reclamacoes"] += len(_as_list(fs.get("problemas_identificados")))
-            stats["gaps"] += len(_as_list(fs.get("gap_produto")))
-            # feedback_produto não carrega polaridade própria; só conta como
-            # elogio quando o sentimento geral da reunião já foi classificado
-            # como positivo — não inferimos tom a partir do texto livre.
-            if sentimento.get("classificacao") == "positivo":
-                stats["elogios"] += len(_as_list(fs.get("feedback_produto")))
+            for marca, presente in _meeting_marks(fs).items():
+                stats[marca] += int(presente)
 
         month = _month_key(metadata.get("DT_MEETING"))
         if month:
@@ -450,6 +478,11 @@ def product_meetings(
     mesma aproximação usada para contar ``reclamacoes``/``gaps``/``elogios``
     por produto, então o número na barra e a lista de reuniões por trás dele
     batem sempre.
+
+    E agora batem na mesma unidade: uma entrada por reunião aqui, uma reunião
+    contada lá (ver :func:`_meeting_marks`). Os itens da reunião vêm em
+    ``itens``, para a lista poder mostrar o que foi dito sem que a contagem
+    dependa de quantos itens a IA extraiu.
     """
     extra_where, params = _build_filters(
         uf=uf, segmento=segmento, unidade=unidade, formato=formato,
@@ -583,6 +616,13 @@ def product_insights(
     A exceção é ``mencoes_totais``, que conta toda reunião que cita o produto,
     inclusive junto com outros — é o número de ``top_produtos[].mencoes`` no
     ``/executive``, servido aqui para a tela não precisar das duas chamadas.
+
+    Duas unidades convivem na resposta, de propósito. ``saude_mensal`` conta
+    **reuniões** por mês (quantas trouxeram reclamação, gap, elogio), igual ao
+    Gráfico de Produto, via :func:`_meeting_marks`; ``natureza_gaps`` conta
+    **itens**, porque lá a unidade é o gap e as fatias precisam fechar com o
+    total apontado. Somar os três de ``saude_mensal`` não dá um número de
+    reuniões: as marcas se sobrepõem.
     """
     extra_where, params = _build_filters(
         uf=uf, segmento=segmento, unidade=unidade, formato=formato,
@@ -602,25 +642,26 @@ def product_insights(
             continue
         reunioes_detalhadas += 1
 
-        sentimento = _summary_block(fs, "sentimento")
-        reclamacoes = len(_as_list(fs.get("problemas_identificados")))
-        gap_itens = _as_list(fs.get("gap_produto"))
-        gaps = len(gap_itens)
-        for gap in gap_itens:
+        # `natureza_gaps` continua contando **itens**: ali a unidade é o gap, e
+        # a soma das fatias tem de fechar com o total de gaps apontados.
+        for gap in _as_list(fs.get("gap_produto")):
             categoria = classify_gap(gap)
             nature_counts[categoria] = nature_counts.get(categoria, 0) + 1
-        # Mesmo critério do agregado e de `product_meetings`: feedback só vira
-        # elogio quando o sentimento geral da reunião já foi positivo.
-        elogios = (
-            len(_as_list(fs.get("feedback_produto")))
-            if sentimento.get("classificacao") == "positivo" else 0
-        )
+
+        # `saude_mensal` conta **reuniões**, a mesma unidade do Gráfico de
+        # Produto — as duas telas usam as mesmas três palavras e não podem
+        # querer dizer coisas diferentes com elas.
+        marcas = _meeting_marks(fs)
 
         metadata = row.meeting_metadata or {}
         month = _month_key(metadata.get("DT_MEETING"))
         if month:
-            _bump_health(monthly.setdefault(month, _empty_health_bucket()),
-                         reclamacoes=reclamacoes, gaps=gaps, elogios=elogios)
+            _bump_health(
+                monthly.setdefault(month, _empty_health_bucket()),
+                reclamacoes=int(marcas["reclamacoes"]),
+                gaps=int(marcas["gaps"]),
+                elogios=int(marcas["elogios"]),
+            )
 
         for persona in _as_list(fs.get("persona")):
             persona_counts[persona] = persona_counts.get(persona, 0) + 1

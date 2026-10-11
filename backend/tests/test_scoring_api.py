@@ -94,3 +94,18 @@ def test_invalid_rulers_are_refused_before_reaching_the_ia(api, payload, motivo)
     response = client.put("/api/dashboard/scoring", json=payload)
     assert response.status_code == 422, motivo
     assert not sent, f"{motivo}: não deveria chegar na IA"
+
+
+def test_browser_preflight_allows_put():
+    """O CORS listava GET, POST e DELETE. O navegador barrava o preflight do PUT
+    antes de chegar na rota, e o botão de salvar falhava com erro de rede."""
+    from core.config import settings
+    from main import app
+
+    response = TestClient(app).options("/api/dashboard/scoring", headers={
+        "Origin": settings.cors_origins[0],
+        "Access-Control-Request-Method": "PUT",
+    })
+
+    assert response.status_code == 200
+    assert "PUT" in response.headers["access-control-allow-methods"]

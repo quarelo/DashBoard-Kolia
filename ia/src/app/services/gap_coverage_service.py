@@ -34,8 +34,9 @@ de marketing inteira, e elas se parecem todas. Ver o comentário de
 `gap_coverage_possible_enabled` em core/config.py.
 """
 import logging
+import time
 
-from sqlalchemy import select
+from sqlalchemy import select, text as sql_text
 from sqlalchemy.orm import Session
 
 from src.app.core.config import settings
@@ -51,10 +52,11 @@ COVERAGE_NONE = "sem_cobertura"
 # Embeddar custa ~17 ms com o modelo residente, e o texto de um gap nunca muda
 # depois que a análise fecha — então o mesmo gap reembeddado a cada abertura da
 # página era puro desperdício. (O que custa caro é o modelo *não* estar
-# residente: ~5 s de carga. Contra isso o cache não ajuda, porque é a primeira
-# chamada que paga; quem ajuda é o `keep_alive` em `generate_embeddings` e o
-# aquecimento no startup do serviço.) Cache em processo,
-# não em tabela: os 354 gaps distintos da carga atual ocupam ~2,6 MB de vetor
+# residente: ~5 s de carga. Contra isso o cache não ajuda por si, porque seria
+# a primeira chamada a pagar; quem ajuda é o `keep_alive` em
+# `generate_embeddings` e o `warm_all_gaps` do startup, que põe o cache quente
+# antes de alguém abrir a página.) Cache em processo,
+# não em tabela: os 356 gaps distintos da carga atual ocupam ~2,6 MB de vetor
 # (768 floats), desprezível ao lado dos 4 GB que o Ollama segura, e assim não
 # precisa de migration nem entra na lista de `AI_ROWS_BY_ANALYSIS` do backend.
 # Esvazia no restart; se isso incomodar, o passo seguinte é uma tabela
@@ -62,6 +64,11 @@ COVERAGE_NONE = "sem_cobertura"
 # complica a exclusão de reunião.
 _EMBEDDING_CACHE: dict[str, list[float]] = {}
 _CACHE_MAX = 5000
+
+# Lote do aquecimento. Medido com os 356 gaps distintos da carga: uma chamada
+# só custou 1,73 s e lotes de 64 custaram 1,51 s — empate dentro do ruído, e o
+# lote ganha por limitar o tamanho do corpo quando a base crescer.
+_WARM_BATCH = 64
 
 
 def _store(text: str, embedding: list[float]) -> list[float]:
@@ -90,9 +97,74 @@ def _warm_cache(texts: list[str]) -> int:
     missing = [text for text in texts if text not in _EMBEDDING_CACHE]
     if not missing:
         return 0
-    for text, embedding in zip(missing, generate_embeddings(missing)):
-        _store(text, embedding)
+    for start in range(0, len(missing), _WARM_BATCH):
+        batch = missing[start:start + _WARM_BATCH]
+        for text, embedding in zip(batch, generate_embeddings(batch)):
+            _store(text, embedding)
     return len(missing)
+
+
+# Todo texto de gap que existe no banco, distinto e aparado, do mais recente
+# para o mais antigo. É a consulta do aquecimento: ela não recorta por produto
+# porque o serviço de IA não lê `core.meetings` e, de todo modo, aquecer só um
+# produto deixaria o próximo a pagar a conta.
+_ALL_GAPS_SQL = """
+SELECT DISTINCT ON (gap) btrim(gap) AS gap, a.created_at
+  FROM ai.meeting_analyses a
+  CROSS JOIN LATERAL jsonb_array_elements_text(
+      CASE WHEN jsonb_typeof(a.final_summary -> 'gap_produto') = 'array'
+           THEN a.final_summary -> 'gap_produto' ELSE '[]'::jsonb END
+  ) AS gap
+ WHERE btrim(gap) <> ''
+ ORDER BY gap, a.created_at DESC
+ LIMIT :limite
+"""
+
+
+def warm_all_gaps(db: Session) -> int:
+    """Embedda no cache todo gap do banco. Devolve quantos textos entraram.
+
+    Isto existe por causa do que a primeira abertura da Página de Produto
+    pagava. Medido nesta máquina, com o Ollama já de pé: segunda abertura
+    0,29 s, primeira abertura com o cache vazio e o modelo residente 0,57 s, e
+    primeira abertura logo depois de um `docker compose up` **2,36 s** — porque
+    o serviço começa a responder ~3 s antes de o aquecimento do modelo
+    terminar, então quem abre a página nessa janela espera a carga do modelo de
+    qualquer jeito. Com o Ollama fora do ar na subida da IA, o aquecimento se
+    perdia de vez e a conta era 2,65 s.
+
+    Aquecer os gaps junto resolve para **todos** os produtos de uma vez, e não
+    só para o primeiro que alguém abrir: os 356 gaps distintos da carga atual
+    custam 1,7 s numa thread de startup, onde ninguém está esperando, contra
+    ~0,05 s de cache quente por abertura depois disso.
+
+    `LIMIT _CACHE_MAX` não é zelo: `_store` **esvazia o cache inteiro** quando
+    enche, então um aquecimento maior que o cache acabaria jogando fora o que
+    ele mesmo acabou de pôr. Se a base passar disso, o certo é subir o limite ou
+    partir para a tabela endereçada por hash, não deixar o aquecimento girar.
+
+    O log separa SQL de embedding porque os dois já divergiram muito: em três
+    restarts seguidos o total ficou em 3,05 / 2,94 / 2,84 s, com o SQL em 0,09 s
+    — mas o primeiro boot depois de um `--build` levou 16,05 s, com container
+    frio, primeira conexão TLS no Postgres remoto e a recuperação do worker
+    junto. Sem os dois números na mesma linha, a próxima vez que isso aparecer
+    vira adivinhação.
+    """
+    sql_started = time.perf_counter()
+    rows = db.execute(sql_text(_ALL_GAPS_SQL), {"limite": _CACHE_MAX}).all()
+    gaps = [row.gap for row in rows]
+    sql_seconds = time.perf_counter() - sql_started
+    if not gaps:
+        logger.info("gap_warmup_vazio sql=%.2fs", sql_seconds)
+        return 0
+
+    embed_started = time.perf_counter()
+    warmed = _warm_cache(gaps)
+    logger.info(
+        "gap_warmup gaps=%d lotes=%d sql=%.2fs embed=%.2fs",
+        warmed, _WARM_BATCH, sql_seconds, time.perf_counter() - embed_started,
+    )
+    return warmed
 
 
 def cache_size() -> int:
