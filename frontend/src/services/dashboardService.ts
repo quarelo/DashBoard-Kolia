@@ -15,7 +15,9 @@ import type {
   ProductMeetings,
   ProductQualityMetric,
   ProductQualityProfile,
+  PublicStats,
   SentimentClass,
+  ProductBreakdown,
 } from "../types";
 
 /* ── shapes cruas do backend ─────────────────────────────────────────── */
@@ -333,6 +335,19 @@ export const dashboardService = {
     return toGapCoverage(raw);
   },
 
+  /** Todos os produtos citados, do mais ao menos citado (o /executive corta em 10). */
+  async products(): Promise<{ total: number; items: ProductBreakdown[] }> {
+    const raw = await apiRequest<{ total: number; items: RawExecutiveDashboard["top_produtos"] }>(
+      "/api/dashboard/products",
+    );
+    return {
+      total: raw.total,
+      items: (raw.items ?? []).map((p) => ({
+        nome: p.nome, mencoes: p.mencoes, reclamacoes: p.reclamacoes, gaps: p.gaps, elogios: p.elogios,
+      })),
+    };
+  },
+
   async overview(): Promise<DashboardOverview> {
     const raw = await apiRequest<RawOverview>("/api/dashboard/overview");
     return {
@@ -464,4 +479,22 @@ export function formatDuration(minutes: number): string {
   const hours = Math.floor(rounded / 60);
   const rest = rounded % 60;
   return rest === 0 ? `${hours}h` : `${hours}h ${rest}min`;
+}
+
+/** Números da landing. Sem token: a página inicial não tem sessão. */
+export async function publicStats(): Promise<PublicStats> {
+  const raw = await apiRequest<{
+    reunioes_analisadas: number;
+    riscos_detectados: number;
+    oportunidades_detectadas: number;
+    produtos_citados: number;
+    corte_score: number;
+  }>("/api/public/stats", { auth: false });
+  return {
+    reunioesAnalisadas: raw.reunioes_analisadas,
+    riscosDetectados: raw.riscos_detectados,
+    oportunidadesDetectadas: raw.oportunidades_detectadas,
+    produtosCitados: raw.produtos_citados,
+    corteScore: raw.corte_score,
+  };
 }

@@ -299,6 +299,7 @@ def executive_overview(
     dt_meeting_from: str | None = None,
     dt_meeting_to: str | None = None,
     top_n: int = 5,
+    products_limit: int | None = 10,
 ) -> dict:
     """Agregações para a Dashboard Executiva.
 
@@ -407,7 +408,9 @@ def executive_overview(
     top_product_name = max(product_mentions, key=product_mentions.get) if product_mentions else None
 
     top_produtos = []
-    for name, mentions in sorted(product_mentions.items(), key=lambda e: e[1], reverse=True)[:10]:
+    # O gráfico da Dashboard mostra o Top 10; a tela de Produtos pede todos
+    # (`products_limit=None`), senão ela listava 10 de mais de cem citados.
+    for name, mentions in sorted(product_mentions.items(), key=lambda e: e[1], reverse=True)[:products_limit]:
         entry = {"nome": name, "mencoes": mentions}
         if name in product_single_stats:
             entry.update(product_single_stats[name])

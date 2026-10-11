@@ -65,11 +65,25 @@ There are no `__init__.py` files — modules import each other with flat paths (
 
 - `overview`, `executive` and `meetings` accept the same filters (`uf`, `segmento`, `unidade`, `formato`, `cnae`, `dt_meeting_from`, `dt_meeting_to`), applied to `core.meetings.source_metadata`. So do the four product reads below.
 - **`m.transcription` is not in `_BASE_SELECT`.** It is the fattest column in the database (15 MB across the 912 meetings) and no aggregation reads the text — only `get_analysis`, which loads one meeting, via `_DETAIL_SELECT`. The four aggregations scan the table with no `LIMIT`, so dragging it cost **1.32 s per call against 0.14 s without** (201 analyses, remote Postgres), and the Product page fires three of those: it waited 3.5 s to return 1 KB of JSON. If you add a column to the shared select, check it is one every aggregation actually needs.
+- `GET /products` lists **every** cited product, most cited first, with the same filters. It reuses `executive_overview(products_limit=None)`: `/executive` still cuts `top_produtos` at 10 for the Dashboard chart, and the Products screen used to read that cut, so it showed 10 of the 100 products cited across 303 analyses.
 - The Product page is served by four reads: `GET /products/{nome}/insights` (monthly health, gap nature, personas, plus `mencoes_totais` so the page does not have to aggregate the whole `/executive` for one KPI), `/products/{nome}/meetings`, `/products/{nome}/quality` (five per-meeting metrics against the portfolio average) and `/products/{nome}/gap-coverage`. The product cut is a SQL `WHERE` on `final_summary -> 'produto' @> …`, deliberately the looser "cites the product" condition, with the single-product rule still enforced in Python. Contract, calibration and the measured numbers: `docs/product-page-analytics.md`.
 - `GET /products/{nome}/gap-coverage` is the **only dashboard read that calls the IA**, and the only one that is not read-only arithmetic. Neither service can answer it alone: the cut depends on `core.meetings` (which the IA does not read) and the catalogue match depends on embeddings and `ai.products` (which the backend does not touch), so the backend slices the gap texts and `POST /produtos/gaps-catalogo` on the IA matches them. Its timeout is 120 s, not the client's default 30 s, because a cold Ollama pays a model load. No gaps answers empty without calling the IA.
 - An analysis sent straight to the IA, without an import, has no `core.meetings` row: it is listed, but its page has no metadata grid and no transcription. The IA's own `ai.meeting_analyses.source_metadata` (the 5 prompt-context fields) is not read here.
 - `GET /meetings/{analysis_id}/chat/conversations`, `GET /meetings/{analysis_id}/chat/conversations/{conversation_id}` and `POST /meetings/{analysis_id}/chat` proxy the IA's chat. A meeting can have several conversations (`ai.chat_conversations`, messages in `ai.chat_messages`); a question without `conversation_id` starts a new one, and the answer carries its id. `GET /meetings/{analysis_id}/chat` still returns the latest conversation.
 - `DELETE /meetings/{analysis_id}` is the one place the backend writes to schema `ai`: see "Serviços" in the root `CLAUDE.md`. A `USER` deletes meetings they imported, a `SALES_DIRECTOR` any; an analysis still processing answers `409 ANALYSIS_IN_PROGRESS`.
+
+## Rota pública
+
+`GET /api/public/stats` (`routers/public.py`) é a única leitura sem token, e
+existe porque a landing não tem sessão: ela trazia "500+ reuniões", "R$ 3.2M de
+pipeline" e "87% de precisão" escritos no HTML, números que não saíam de lugar
+nenhum. A rota devolve quatro contagens sobre `ai.meeting_analyses` — reuniões
+analisadas, reuniões com risco e com oportunidade acima de `HIGH_SCORE` (70, o
+mesmo corte dos dois lados) e produtos distintos citados. Nenhum nome, nenhum
+título, nenhum texto de transcrição sai por aqui, e precisa continuar assim.
+
+O `score` é JSON: o SQL filtra por `~ '^[0-9]+$'` antes do cast, senão um resumo
+antigo sem o campo derruba a página inteira com erro de conversão.
 
 ## Auth flow
 

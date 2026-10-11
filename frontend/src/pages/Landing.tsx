@@ -1,13 +1,16 @@
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import {
-  ArrowRight, CheckCircle2, ChevronRight, Star,
+  ArrowRight, CheckCircle2, ChevronRight,
   FileText, Brain, Sparkles, BarChart3,
   TrendingDown, Target, Package, Heart,
   Shield, Clock, Users, Zap, LineChart,
   Play, BrainCircuit,
 } from "lucide-react";
 import { KoliaLogo } from "../components/ui/KoliaLogo";
+import { useAsync } from "../lib/useAsync";
+import { publicStats } from "../services/dashboardService";
+import type { PublicStats } from "../types";
 
 /* ─── data ─────────────────────────────────────────────────── */
 const navLinks = [
@@ -47,23 +50,34 @@ const differentials = [
   { icon: LineChart,    title: "ROI mensurável",        desc: "Rastreie o impacto de cada insight em receita retida e oportunidades geradas." },
 ];
 
-const metrics = [
-  { value: "500+",   label: "Reuniões analisadas",     sub: "nos últimos 30 dias" },
-  { value: "R$ 3.2M", label: "Pipeline gerado via IA", sub: "em oportunidades qualificadas" },
-  { value: "404",    label: "Riscos detectados",       sub: "com ação preventiva" },
-  { value: "87%",    label: "Precisão dos insights",   sub: "validada pelos times de CS" },
-];
+/** Os quatro números da seção "Resultados", já com o rótulo de cada um.
+ *
+ * Vêm de `GET /api/public/stats`, medidos no banco a cada carregamento. Antes
+ * eram escritos à mão aqui ("500+ reuniões", "R$ 3.2M de pipeline", "87% de
+ * precisão") — nenhum deles tinha de onde sair.
+ */
+function metricsFrom(stats: PublicStats) {
+  return [
+    { value: String(stats.reunioesAnalisadas), label: "Reuniões analisadas",
+      sub: "transcrições processadas pela IA" },
+    { value: String(stats.riscosDetectados), label: "Reuniões em risco de churn",
+      sub: `score de risco ${stats.corteScore} ou mais` },
+    { value: String(stats.oportunidadesDetectadas), label: "Oportunidades de expansão",
+      sub: `score de oportunidade ${stats.corteScore} ou mais` },
+    { value: String(stats.produtosCitados), label: "Produtos citados",
+      sub: "nomeados pelos clientes nas conversas" },
+  ];
+}
 
-const testimonials = [
-  { name: "Ana Ribeiro",    role: "VP de Tecnologia",   company: "Grupo Vivo",             text: "A KOLIA transformou a forma como nossa equipe processa reuniões. O que levava dias é entregue em minutos, com precisão cirúrgica.", rating: 5 },
-  { name: "Roberto Alves",  role: "CFO",                company: "Petrobras Distribuidora", text: "Identificamos uma oportunidade de R$ 3M em automação fiscal diretamente de um QBR. O ROI foi imediato e inegável.", rating: 5 },
-  { name: "Rodrigo Campos", role: "CTO",                company: "WEG Equipamentos",        text: "A IA captou nuances que um analista humano demoraria semanas para encontrar. Isso mudou como gerenciamos o relacionamento.", rating: 5 },
-];
+/** Quanto das reuniões analisadas tem oportunidade acima do corte. */
+function opportunityShare(stats: PublicStats | null): number {
+  if (!stats || stats.reunioesAnalisadas === 0) return 0;
+  return Math.round((stats.oportunidadesDetectadas / stats.reunioesAnalisadas) * 100);
+}
 
-const clients = ["Vivo", "Petrobras", "Ambev", "Embraer", "Vale", "Bradesco", "Natura", "WEG"];
-
-/* ─── mock dashboard preview ──────────────────────────────── */
-function DashboardPreview() {
+/* ─── preview do dashboard ────────────────────────────────── */
+/** A moldura é ilustração; os números dentro dela são os mesmos do banco. */
+function DashboardPreview({ stats }: { stats: PublicStats | null }) {
   return (
     <div className="bg-[#111827] rounded-2xl overflow-hidden shadow-2xl border border-white/10 w-full">
       {/* Browser chrome */}
@@ -95,14 +109,14 @@ function DashboardPreview() {
           {/* KPIs */}
           <div className="grid grid-cols-4 gap-2 mb-3">
             {[
-              { label: "Reuniões", value: "500", color: "#E76B38" },
-              { label: "Em Risco", value: "3",   color: "#ef4444" },
-              { label: "Oportunidades", value: "47",  color: "#22c55e" },
-              { label: "NPS Médio", value: "72",  color: "#8b5cf6" },
+              { label: "Reuniões", value: stats?.reunioesAnalisadas, color: "#E76B38" },
+              { label: "Em Risco", value: stats?.riscosDetectados, color: "#ef4444" },
+              { label: "Oportunidades", value: stats?.oportunidadesDetectadas, color: "#22c55e" },
+              { label: "Produtos", value: stats?.produtosCitados, color: "#8b5cf6" },
             ].map((k) => (
               <div key={k.label} className="bg-white/5 rounded-lg p-2.5">
                 <p className="text-[9px] text-slate-500 mb-1">{k.label}</p>
-                <p className="text-lg font-black" style={{ color: k.color }}>{k.value}</p>
+                <p className="text-lg font-black" style={{ color: k.color }}>{k.value ?? "—"}</p>
               </div>
             ))}
           </div>
@@ -126,10 +140,10 @@ function DashboardPreview() {
                 <svg viewBox="0 0 36 36" className="w-full h-full -rotate-90">
                   <circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="4" />
                   <circle cx="18" cy="18" r="14" fill="none" stroke="#E76B38" strokeWidth="4"
-                    strokeDasharray={`${60 * 0.88} 100`} strokeLinecap="round" />
+                    strokeDasharray={`${opportunityShare(stats) * 0.88} 100`} strokeLinecap="round" />
                 </svg>
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <span className="text-xs font-black text-white">60%</span>
+                  <span className="text-xs font-black text-white">{opportunityShare(stats)}%</span>
                 </div>
               </div>
             </div>
@@ -144,6 +158,9 @@ function DashboardPreview() {
 export function Landing() {
   const navigate = useNavigate();
   const { user } = useAuth();
+  // Sem sessão e sem bloquear a página: se a API não responder, a seção de
+  // resultados não aparece em vez de aparecer com número inventado.
+  const { data: stats } = useAsync(publicStats, []);
   const goDash = () => navigate(user ? "/app/dashboard" : "/login");
 
   return (
@@ -224,24 +241,10 @@ export function Landing() {
               {/* Glow */}
               <div className="absolute inset-0 bg-brand/10 rounded-3xl blur-3xl scale-95 pointer-events-none" />
               <div className="relative">
-                <DashboardPreview />
+                <DashboardPreview stats={stats} />
               </div>
             </div>
           </div>
-        </div>
-      </section>
-
-      {/* ── Clients ────────────────────────────────────────────── */}
-      <section className="py-10 border-y border-surface-border bg-surface">
-        <p className="text-center text-xs font-semibold text-ink-muted uppercase tracking-widest mb-6">
-          Confiado por times comerciais de grandes empresas brasileiras
-        </p>
-        <div className="flex flex-wrap items-center justify-center gap-8 px-6">
-          {clients.map((c) => (
-            <span key={c} className="text-sm font-bold text-ink-disabled uppercase tracking-wider hover:text-ink-secondary transition-colors">
-              {c}
-            </span>
-          ))}
         </div>
       </section>
 
@@ -360,58 +363,29 @@ export function Landing() {
       </section>
 
       {/* ── Métricas ───────────────────────────────────────────── */}
-      <section id="resultados" className="py-24 px-6 bg-surface">
-        <div className="max-w-7xl mx-auto">
-          <div className="text-center mb-14">
-            <p className="section-label mb-3">Resultados</p>
-            <h2 className="text-4xl font-extrabold text-ink mb-4">Números que falam por si</h2>
-            <p className="text-ink-secondary max-w-xl mx-auto">
-              Dados reais de clientes que utilizam a KOLIA no dia a dia comercial.
-            </p>
-          </div>
+      {stats && (
+        <section id="resultados" className="py-24 px-6 bg-surface">
+          <div className="max-w-7xl mx-auto">
+            <div className="text-center mb-14">
+              <p className="section-label mb-3">Resultados</p>
+              <h2 className="text-4xl font-extrabold text-ink mb-4">Números que falam por si</h2>
+              <p className="text-ink-secondary max-w-xl mx-auto">
+                Medidos na base da plataforma, a cada vez que esta página abre.
+              </p>
+            </div>
 
-          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-5">
-            {metrics.map((m, i) => (
-              <div key={i} className="card p-8 text-center hover:shadow-card-md hover:border-brand/25 transition-all">
-                <p className="text-4xl font-black text-brand mb-2">{m.value}</p>
-                <p className="font-semibold text-ink text-sm mb-1">{m.label}</p>
-                <p className="text-xs text-ink-secondary">{m.sub}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ── Testimonials ───────────────────────────────────────── */}
-      <section className="py-24 px-6">
-        <div className="max-w-7xl mx-auto">
-          <div className="text-center mb-14">
-            <p className="section-label mb-3">Depoimentos</p>
-            <h2 className="text-4xl font-extrabold text-ink mb-4">Quem usa, recomenda</h2>
-          </div>
-          <div className="grid md:grid-cols-3 gap-6">
-            {testimonials.map((t, i) => (
-              <div key={i} className="card p-7 flex flex-col hover:shadow-card-md hover:border-brand/25 transition-all">
-                <div className="flex gap-0.5 mb-4">
-                  {Array.from({ length: t.rating }).map((_, s) => (
-                    <Star key={s} size={13} className="text-amber-400 fill-amber-400" />
-                  ))}
+            <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-5">
+              {metricsFrom(stats).map((m, i) => (
+                <div key={i} className="card p-8 text-center hover:shadow-card-md hover:border-brand/25 transition-all">
+                  <p className="text-4xl font-black text-brand mb-2">{m.value}</p>
+                  <p className="font-semibold text-ink text-sm mb-1">{m.label}</p>
+                  <p className="text-xs text-ink-secondary">{m.sub}</p>
                 </div>
-                <p className="text-sm text-ink-secondary leading-relaxed flex-1 mb-6">"{t.text}"</p>
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-full gradient-brand flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
-                    {t.name[0]}
-                  </div>
-                  <div>
-                    <p className="text-sm font-semibold text-ink">{t.name}</p>
-                    <p className="text-xs text-ink-secondary">{t.role} · {t.company}</p>
-                  </div>
-                </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* ── CTA Final ──────────────────────────────────────────── */}
       <section className="py-24 px-6 gradient-brand relative overflow-hidden">
@@ -422,7 +396,9 @@ export function Landing() {
             Comece a transformar reuniões em receita
           </h2>
           <p className="text-white/75 text-lg mb-10 max-w-xl mx-auto">
-            Mais de 500 reuniões analisadas. R$ 3.2M em pipeline gerado. Seu próximo insight está a um clique.
+            {stats
+              ? `${stats.reunioesAnalisadas} reuniões analisadas e ${stats.oportunidadesDetectadas} oportunidades de expansão encontradas. Seu próximo insight está a um clique.`
+              : "Seu próximo insight está a um clique."}
           </p>
           <button
             onClick={goDash}
