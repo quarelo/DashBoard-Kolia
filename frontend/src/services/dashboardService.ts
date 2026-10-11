@@ -17,6 +17,7 @@ import type {
   ProductQualityProfile,
   PublicStats,
   SentimentClass,
+  ProductBreakdown,
 } from "../types";
 
 /* ── shapes cruas do backend ─────────────────────────────────────────── */
@@ -332,6 +333,19 @@ export const dashboardService = {
       `/api/dashboard/products/${encodeURIComponent(nome)}/gap-coverage`,
     );
     return toGapCoverage(raw);
+  },
+
+  /** Todos os produtos citados, do mais ao menos citado (o /executive corta em 10). */
+  async products(): Promise<{ total: number; items: ProductBreakdown[] }> {
+    const raw = await apiRequest<{ total: number; items: RawExecutiveDashboard["top_produtos"] }>(
+      "/api/dashboard/products",
+    );
+    return {
+      total: raw.total,
+      items: (raw.items ?? []).map((p) => ({
+        nome: p.nome, mencoes: p.mencoes, reclamacoes: p.reclamacoes, gaps: p.gaps, elogios: p.elogios,
+      })),
+    };
   },
 
   async overview(): Promise<DashboardOverview> {

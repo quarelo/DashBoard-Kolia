@@ -1,25 +1,33 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Package } from "lucide-react";
 import { Card } from "../components/ui/Card";
+import { Pagination } from "../components/ui/Pagination";
 import { PageError, PageLoader, EmptyState } from "../components/ui/PageState";
 import { dashboardService } from "../services/dashboardService";
 import { useAsync } from "../lib/useAsync";
 import type { ProductBreakdown } from "../types";
 
+// A rota devolve o catálogo citado inteiro de uma vez (são ~100 linhas de
+// contagem, não reuniões), então a paginação é só de tela.
+const PAGE_SIZE = 24;
+
 export function Products() {
-  const { data, loading, error, reload } = useAsync(() => dashboardService.executive(), []);
+  const { data, loading, error, reload } = useAsync(() => dashboardService.products(), []);
+  const [page, setPage] = useState(0);
 
   if (loading) return <PageLoader label="Carregando produtos..." />;
   if (error || !data) return <PageError message={error ?? "Sem dados."} onRetry={reload} />;
 
-  const items = data.topProdutos;
+  const pageCount = Math.max(1, Math.ceil(data.items.length / PAGE_SIZE));
+  const items = data.items.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   return (
     <div className="space-y-6 animate-fade-in">
       <div>
         <h1 className="text-2xl font-extrabold text-ink">Produtos</h1>
         <p className="text-sm text-ink-secondary mt-0.5">
-          Os 10 produtos mais citados nas reuniões analisadas — clique num card para ver o detalhe
+          {data.total} produtos citados nas reuniões analisadas, do mais ao menos citado — clique num card para ver o detalhe
         </p>
       </div>
 
@@ -35,6 +43,8 @@ export function Products() {
           ))}
         </div>
       )}
+
+      <Pagination page={page} pageCount={pageCount} onPageChange={setPage} />
     </div>
   );
 }
