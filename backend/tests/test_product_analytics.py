@@ -1,17 +1,17 @@
-"""As duas leituras da Página de Produto que não precisam de banco: a natureza
-de um gap e as cinco médias do perfil de qualidade.
+"""As leituras de produto que não precisam de banco: a natureza de um gap, as
+cinco médias do perfil de qualidade e as três marcas do Gráfico de Produto.
 
-`product_insights` e `product_quality_profile` inteiros passam por Postgres (o
-`WHERE` do recorte é JSONB), então o que está fixado aqui são as duas funções
-puras por trás deles — é onde mora a regra, e é o que quebraria calado numa
-mudança de vocabulário ou de denominador.
+`product_insights`, `product_quality_profile` e `executive_overview` inteiros
+passam por Postgres (o `WHERE` do recorte é JSONB), então o que está fixado aqui
+são as funções puras por trás deles — é onde mora a regra, e é o que quebraria
+calado numa mudança de vocabulário, de denominador ou de unidade de contagem.
 """
 from types import SimpleNamespace
 
 import pytest
 
 from services.analysis_read import (
-    GAP_NATURE_UNCLASSIFIED, _quality_metrics, classify_gap,
+    GAP_NATURE_UNCLASSIFIED, _meeting_marks, _quality_metrics, classify_gap,
 )
 
 
@@ -99,3 +99,69 @@ def test_quality_metrics_sem_reuniao_nao_divide_por_zero():
         "gaps_por_reuniao", "duvidas_por_reuniao",
     }
     assert all(value == 0.0 for value in valores.values())
+
+
+# --- marcas do Gráfico de Produto -------------------------------------------
+
+
+def test_meeting_marks_conta_reuniao_e_nao_item():
+    """A regra que o gráfico mostra: uma reunião com três reclamações é **uma**
+    reunião com reclamação. Se isto voltar a contar itens, a barra volta a medir
+    o quanto a IA detalhou a reunião em vez de em quantas conversas o assunto
+    apareceu."""
+    marcas = _meeting_marks({
+        "problemas_identificados": ["p1", "p2", "p3"],
+        "gap_produto": ["g1"],
+        "sentimento": {"classificacao": "positivo"},
+        "feedback_produto": ["f1", "f2"],
+    })
+
+    assert marcas == {"reclamacoes": True, "gaps": True, "elogios": True}
+
+
+def test_meeting_marks_sem_nada_nao_marca_nada():
+    assert _meeting_marks({}) == {
+        "reclamacoes": False, "gaps": False, "elogios": False,
+    }
+
+
+@pytest.mark.parametrize("classificacao, esperado", [
+    ("positivo", True),
+    ("misto", False),
+    ("negativo", False),
+    ("neutro", False),
+])
+def test_meeting_marks_elogio_exige_sentimento_positivo(classificacao, esperado):
+    """`feedback_produto` não carrega polaridade própria — só vira elogio quando
+    o sentimento geral da reunião já foi classificado como positivo. Sem isso,
+    "o preço está alto" entraria como elogio ao produto."""
+    marcas = _meeting_marks({
+        "feedback_produto": ["o módulo fiscal atende"],
+        "sentimento": {"classificacao": classificacao},
+    })
+
+    assert marcas["elogios"] is esperado
+
+
+def test_meeting_marks_ignora_final_summary_nao_dicionario():
+    """A coluna é JSONB e pode voltar como lista ou nulo numa análise antiga; o
+    Gráfico de Produto não pode quebrar por isso."""
+    assert _meeting_marks(None)["gaps"] is False
+    assert _meeting_marks([])["reclamacoes"] is False
+
+
+def test_meeting_marks_e_a_unidade_das_duas_telas():
+    """`executive_overview` (Gráfico de Produto) e `product_insights`
+    (`saude_mensal`) contam pela mesma função, de propósito: as duas telas usam
+    as mesmas três palavras e não podem querer dizer coisas diferentes com
+    elas. `natureza_gaps` é a exceção documentada — lá a unidade é o gap.
+
+    Este teste fixa o contrato que as duas consomem: três chaves, booleanas,
+    com os nomes que viram campos na resposta.
+    """
+    marcas = _meeting_marks({"gap_produto": ["g1", "g2", "g3"]})
+
+    assert set(marcas) == {"reclamacoes", "gaps", "elogios"}
+    assert all(isinstance(value, bool) for value in marcas.values())
+    # Três gaps, uma reunião — é o que o mês soma, e o que a barra soma.
+    assert int(marcas["gaps"]) == 1

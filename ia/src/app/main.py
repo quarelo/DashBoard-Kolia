@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from contextlib import asynccontextmanager
 from uuid import UUID
 
@@ -22,7 +23,7 @@ from src.app.schemas.analysis import (
     ChatConversationListResponse, ChatConversationResponse,
 )
 from src.app.services.analysis_service import build_analysis_progress, prepare_analysis
-from src.app.services.gap_coverage_service import match_gaps
+from src.app.services.gap_coverage_service import match_gaps, warm_all_gaps
 from src.app.services.llm_service import (
     OllamaError, complete_missing_fields, generate_embedding, missing_fields,
 )
@@ -68,26 +69,66 @@ app = FastAPI(title="KOLIA IA Service", version="0.1.0", lifespan=lifespan)
 logger = logging.getLogger("uvicorn.error")
 
 
-def _warm_embedding_model() -> None:
-    """Carrega o modelo de embedding no Ollama já no startup.
+# Tentativas do aquecimento e espera entre elas. O `depends_on` do Compose usa
+# `condition: service_started` e o Ollama não tem healthcheck, então a IA sobe
+# junto com ele e pode chamar antes de a porta 11434 aceitar conexão — medido
+# num `docker compose up`: o aquecimento morria em `Name or service not known`,
+# só logava o aviso e nunca mais tentava, e aí a primeira abertura da Página de
+# Produto pagava a carga do modelo (2,65 s). Dez tentativas a cada 3 s cobrem
+# 30 s de subida do Ollama, de sobra para o que foi observado (~1 s).
+_WARMUP_ATTEMPTS = 10
+_WARMUP_RETRY_SECONDS = 3.0
 
-    Carregar custa ~5 s contra ~17 ms de uma chamada com o modelo residente, e
-    quem pagava esses 5 s era a primeira abertura da Página de Produto depois de
-    cada restart. Uma chamada de embedding aqui transfere esse custo para a
+
+def _warm_embedding_model() -> None:
+    """Põe o modelo de embedding e os gaps em cache já no startup.
+
+    Carregar o modelo custa ~5 s contra ~17 ms de uma chamada com ele
+    residente, e quem pagava isso era a primeira abertura da Página de Produto
+    depois de cada restart. As duas chamadas daqui transferem o custo para a
     subida do serviço, onde ninguém está esperando.
 
-    Roda em thread, não inline: senão o `lifespan` atrasaria 5 s e o
-    healthcheck do Compose veria o serviço fora do ar nesse tempo. Falha é só
-    log — sem o Ollama de pé o serviço tem de subir igual, porque as rotas que
-    não dependem de modelo continuam servindo, e o chat e a análise já
-    respondem o próprio erro.
+    São dois aquecimentos porque eram dois custos. O do modelo some com a
+    primeira chamada bem-sucedida; o dos gaps (`warm_all_gaps`) é o que faz a
+    página abrir quente para **qualquer** produto, e não só para o primeiro que
+    alguém visitar. Ver a docstring de `warm_all_gaps` para os números.
+
+    Roda em thread, não inline: senão o `lifespan` atrasaria o startup e o
+    healthcheck do Compose veria o serviço fora do ar nesse tempo. Falhar é
+    aceitável — sem o Ollama de pé o serviço tem de subir igual, porque as
+    rotas que não dependem de modelo continuam servindo, e o chat e a análise já
+    respondem o próprio erro. O que não é aceitável é desistir na primeira
+    tentativa: ver `_WARMUP_ATTEMPTS`.
     """
+    for attempt in range(1, _WARMUP_ATTEMPTS + 1):
+        try:
+            generate_embedding("aquecimento do modelo de embedding")
+        except Exception as error:  # noqa: BLE001 - aquecer é best-effort
+            if attempt == _WARMUP_ATTEMPTS:
+                logger.warning(
+                    "embedding_warmup_falhou tentativas=%d erro=%s", attempt, error)
+                return
+            logger.info(
+                "embedding_warmup_retry tentativa=%d/%d erro=%s",
+                attempt, _WARMUP_ATTEMPTS, error,
+            )
+            time.sleep(_WARMUP_RETRY_SECONDS)
+        else:
+            logger.info(
+                "embedding_warmup_ok modelo=%s tentativa=%d",
+                settings.embedding_model, attempt,
+            )
+            break
+
+    # O cache de gaps só faz sentido com o modelo já residente, daí vir depois.
+    # A sessão é própria desta thread: `get_db` serve requisição, não startup.
+    # Quem loga os tempos é `warm_all_gaps`, que tem o SQL e o embedding
+    # separados.
     try:
-        generate_embedding("aquecimento do modelo de embedding")
+        with SessionLocal() as db:
+            warm_all_gaps(db)
     except Exception as error:  # noqa: BLE001 - aquecer é best-effort
-        logger.warning("embedding_warmup_falhou erro=%s", error)
-    else:
-        logger.info("embedding_warmup_ok modelo=%s", settings.embedding_model)
+        logger.warning("gap_warmup_falhou erro=%s", error)
 
 
 @app.get("/")

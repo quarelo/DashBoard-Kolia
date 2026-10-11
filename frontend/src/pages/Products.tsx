@@ -4,6 +4,7 @@ import { Card } from "../components/ui/Card";
 import { PageError, PageLoader, EmptyState } from "../components/ui/PageState";
 import { dashboardService } from "../services/dashboardService";
 import { useAsync } from "../lib/useAsync";
+import { meetingMarkLabel } from "../lib/utils";
 import type { ProductBreakdown } from "../types";
 
 export function Products() {
@@ -43,6 +44,8 @@ function ProductCard({ product }: { product: ProductBreakdown }) {
   const navigate = useNavigate();
   const { nome, mencoes, reclamacoes, gaps, elogios } = product;
   const hasDetail = reclamacoes != null || gaps != null || elogios != null;
+  // Denominador das fatias, não um total de reuniões — as três marcas se
+  // sobrepõem. Mesma observação do `ProductBar` do Dashboard.
   const total = (reclamacoes ?? 0) + (gaps ?? 0) + (elogios ?? 0);
 
   return (
@@ -71,24 +74,28 @@ function ProductCard({ product }: { product: ProductBreakdown }) {
               <div
                 className="h-full bg-rose-500"
                 style={{ width: `${((reclamacoes ?? 0) / total) * 100}%` }}
-                title={`${reclamacoes} reclamações`}
+                title={meetingMarkLabel(reclamacoes ?? 0, "reclamação")}
               />
             )}
             {(gaps ?? 0) > 0 && (
               <div
                 className="h-full bg-amber-400"
                 style={{ width: `${((gaps ?? 0) / total) * 100}%` }}
-                title={`${gaps} gaps`}
+                title={meetingMarkLabel(gaps ?? 0, "gap")}
               />
             )}
             {(elogios ?? 0) > 0 && (
               <div
                 className="h-full bg-emerald-500"
                 style={{ width: `${((elogios ?? 0) / total) * 100}%` }}
-                title={`${elogios} elogios`}
+                title={meetingMarkLabel(elogios ?? 0, "elogio")}
               />
             )}
           </div>
+          {/* O qualificador vai numa linha própria, e não colado em cada
+              número, porque o card ocupa um terço da grade no desktop e
+              "3 reuniões com recl." em três colunas não cabe sem quebrar. */}
+          <p className="text-[10px] text-ink-muted leading-none">Reuniões com</p>
           <div className="flex items-center gap-3 text-[11px]">
             <span className="text-rose-600 font-semibold">{reclamacoes ?? 0} recl.</span>
             <span className="text-amber-600 font-semibold">{gaps ?? 0} gaps</span>

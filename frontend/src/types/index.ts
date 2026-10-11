@@ -125,10 +125,15 @@ export interface MonthlyComparison {
 }
 
 /**
- * reclamacoes/gaps/elogios só existem quando a reunião cita exatamente um
- * produto (ver nota em `analysis_read.executive_overview`, backend) — em
- * reuniões com vários produtos citados não há como saber a qual eles se
- * referem, então os três campos vêm ausentes (não zerados).
+ * reclamacoes/gaps/elogios contam **reuniões**, não itens: quantas reuniões
+ * deste produto trouxeram pelo menos uma reclamação, pelo menos um gap, pelo
+ * menos um elogio. As três se sobrepõem, então a soma não é um número de
+ * reuniões — não exiba o total (use `meetingMarkLabel` para os rótulos).
+ *
+ * Os três só existem quando a reunião cita exatamente um produto (ver nota em
+ * `analysis_read.executive_overview`, backend) — em reuniões com vários
+ * produtos citados não há como saber a qual eles se referem, então os três
+ * campos vêm ausentes (não zerados).
  */
 export interface ProductBreakdown {
   nome: string;
@@ -185,6 +190,13 @@ export interface ProductMeetings {
 
 /* ── Página de Produto (GET /api/dashboard/products/{nome}/insights) ─── */
 
+/**
+ * Um mês da saúde do produto. `reclamacoes`/`gaps`/`elogios` contam
+ * **reuniões** daquele mês, não itens — mesma unidade do `ProductBreakdown` do
+ * Gráfico de Produto. As três se sobrepõem (uma reunião pode ter as três), por
+ * isso o gráfico mensal é de barras agrupadas e não empilhadas: a soma não é
+ * um número de reuniões. `reunioes` é o total do mês, sem marca nenhuma.
+ */
 export interface ProductHealthMonth {
   /** "YYYY-MM" — meses variam conforme os dados; nunca fixo. */
   mes: string;

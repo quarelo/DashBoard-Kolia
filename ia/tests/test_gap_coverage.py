@@ -200,3 +200,92 @@ def test_catalogo_curto_demais_para_margem(monkeypatch):
 
     assert out["itens"][0]["cobertura"] == svc.COVERAGE_NONE
     assert out["itens"][0]["distancia"] is None
+
+
+# --- aquecimento do startup -------------------------------------------------
+
+
+class _FakeRow:
+    """Linha do `_ALL_GAPS_SQL`: só o atributo que o código lê."""
+
+    def __init__(self, gap: str):
+        self.gap = gap
+
+
+class _FakeDb:
+    """Sessão que devolve as linhas pedidas, sem Postgres.
+
+    A consulta de verdade é JSONB sobre `ai.meeting_analyses` e precisa de
+    banco, então o que estes testes fixam é o que o aquecimento faz com as
+    linhas — não o SQL.
+    """
+
+    def __init__(self, gaps: list[str]):
+        self._gaps = gaps
+        self.params: list[dict] = []
+
+    def execute(self, _statement, params=None):
+        self.params.append(params or {})
+        return self
+
+    def all(self):
+        return [_FakeRow(gap) for gap in self._gaps]
+
+
+def test_warm_all_gaps_deixa_o_cache_quente(monkeypatch):
+    """O motivo de existir: medido, a primeira abertura da Página de Produto
+    depois de um `docker compose up` custava 2,36 s porque o serviço começa a
+    responder antes de o aquecimento do modelo terminar. Com os gaps já em
+    cache, a abertura cai para 0,37 s — e vale para qualquer produto, não só
+    para o primeiro que alguém visitar."""
+    db = _FakeDb(["gap a", "gap b", "gap c"])
+
+    assert svc.warm_all_gaps(db) == 3
+    assert svc.cache_size() == 3
+
+    # E o que foi aquecido não é reembeddado na primeira abertura real.
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("o gap aquecido não deveria ser embeddado de novo")
+
+    monkeypatch.setattr(svc, "generate_embeddings", fail_if_called)
+    monkeypatch.setattr(svc, "_ranked", lambda db, gap, k: _ranking([0.20, 0.22, 0.25, 0.28, 0.30]))
+    svc.match_gaps(db=None, gaps=["gap a", "gap b"])
+
+
+def test_warm_all_gaps_sem_gap_nenhum_nao_chama_o_modelo(monkeypatch):
+    """Base nova, sem análise: o aquecimento tem de ser um no-op barato, não um
+    erro no startup."""
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("não deveria embeddar sem gap")
+
+    monkeypatch.setattr(svc, "generate_embeddings", fail_if_called)
+
+    assert svc.warm_all_gaps(_FakeDb([])) == 0
+    assert svc.cache_size() == 0
+
+
+def test_warm_all_gaps_parte_em_lotes(monkeypatch):
+    """Com a base crescendo, o aquecimento não pode virar um corpo único de
+    milhares de textos: `_WARM_BATCH` limita o tamanho de cada requisição."""
+    lotes = []
+
+    def spy(texts):
+        lotes.append(len(texts))
+        return [[0.1] * settings.embedding_dim for _ in texts]
+
+    monkeypatch.setattr(svc, "generate_embeddings", spy)
+    gaps = [f"gap {i}" for i in range(svc._WARM_BATCH * 2 + 5)]
+
+    assert svc.warm_all_gaps(_FakeDb(gaps)) == len(gaps)
+    assert lotes == [svc._WARM_BATCH, svc._WARM_BATCH, 5]
+
+
+def test_warm_all_gaps_nao_pede_mais_que_o_cache_aguenta():
+    """`_store` esvazia o cache inteiro quando enche, então um aquecimento maior
+    que `_CACHE_MAX` jogaria fora o que ele mesmo acabou de pôr. O limite é um
+    parâmetro do SQL, e este teste é o que garante que ele continue lá."""
+    db = _FakeDb([])
+
+    svc.warm_all_gaps(db)
+
+    assert db.params == [{"limite": svc._CACHE_MAX}]

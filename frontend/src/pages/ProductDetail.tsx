@@ -49,7 +49,10 @@ export function ProductDetail() {
 
   const { insights, meetings, quality } = data;
   // Somado a partir de `saude_mensal` por ser a mesma fonte dos gráficos
-  // abaixo, então o KPI e a barra do mês nunca discordam.
+  // abaixo, então o KPI e a barra do mês nunca discordam. Somar meses é válido
+  // para cada marca por si — uma reunião cai num mês só, então o total é o
+  // número de reuniões com aquela marca. Somar as três marcas entre si não é:
+  // elas se sobrepõem, e é por isso que não existe um KPI de "total".
   const totals = insights.saudeMensal.reduce(
     (acc, m) => ({
       reclamacoes: acc.reclamacoes + m.reclamacoes,
@@ -87,9 +90,12 @@ export function ProductDetail() {
           icon={<Package size={16} />}
           accent="brand"
         />
-        <KpiCard label="Reclamações" value={totals.reclamacoes} icon={<TriangleAlert size={16} />} accent="rose" />
-        <KpiCard label="Gaps" value={totals.gaps} icon={<AlertTriangle size={16} />} accent="amber" />
-        <KpiCard label="Elogios" value={totals.elogios} icon={<MessageSquare size={16} />} accent="emerald" />
+        {/* O rótulo carrega a unidade: o valor é quantas reuniões trouxeram a
+            marca, não quantos itens a IA extraiu. Sem isso, "9" ao lado de
+            "Reclamações" lê como nove reclamações. */}
+        <KpiCard label="Reuniões com reclamação" value={totals.reclamacoes} icon={<TriangleAlert size={16} />} accent="rose" />
+        <KpiCard label="Reuniões com gap" value={totals.gaps} icon={<AlertTriangle size={16} />} accent="amber" />
+        <KpiCard label="Reuniões com elogio" value={totals.elogios} icon={<MessageSquare size={16} />} accent="emerald" />
       </div>
 
       <CatalogueCoverageCard state={catalogue} />
@@ -111,7 +117,7 @@ export function ProductDetail() {
       <Card>
         <CardHeader>
           <CardTitle>Reclamações, Gaps e Elogios</CardTitle>
-          <CardSubtitle>Reuniões por trás de cada item, citando este produto sozinho</CardSubtitle>
+          <CardSubtitle>As reuniões por trás de cada número, citando este produto sozinho</CardSubtitle>
         </CardHeader>
         <CardContent className="space-y-5">
           <ProductMeetingGroup
@@ -143,7 +149,7 @@ function HealthTrendSection({ items }: { items: ProductHealthMonth[] }) {
     <Card>
       <CardHeader>
         <CardTitle>Saúde do Produto Mês a Mês</CardTitle>
-        <CardSubtitle>Reclamações, gaps e elogios ao longo do tempo</CardSubtitle>
+        <CardSubtitle>Quantas reuniões trouxeram reclamação, gap e elogio em cada mês</CardSubtitle>
       </CardHeader>
       <CardContent>
         {chartData.length === 0 ? (
@@ -156,15 +162,20 @@ function HealthTrendSection({ items }: { items: ProductHealthMonth[] }) {
                 <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
                 <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
                 <Tooltip />
-                <Bar dataKey="reclamacoes" name="Reclamações" stackId="saude" fill="#f43f5e" />
-                <Bar dataKey="gaps" name="Gaps" stackId="saude" fill="#fbbf24" />
-                <Bar dataKey="elogios" name="Elogios" stackId="saude" fill="#22c55e" radius={[4, 4, 0, 0]} />
+                {/* Agrupadas, não empilhadas: as três marcas se sobrepõem — a
+                    mesma reunião pode ter reclamação, gap e elogio —, então o
+                    topo de uma pilha seria um total que não existe, lido num
+                    eixo Y que diz "reuniões". Lado a lado, cada barra se lê
+                    contra o eixo e contra o mesmo mês dos outros meses. */}
+                <Bar dataKey="reclamacoes" name="Reuniões com reclamação" fill="#f43f5e" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="gaps" name="Reuniões com gap" fill="#fbbf24" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="elogios" name="Reuniões com elogio" fill="#22c55e" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
             <div className="flex items-center gap-4 pt-2 text-xs text-ink-secondary">
-              <LegendDot color="bg-rose-500" label="Reclamações" />
-              <LegendDot color="bg-amber-400" label="Gaps" />
-              <LegendDot color="bg-emerald-500" label="Elogios" />
+              <LegendDot color="bg-rose-500" label="Reuniões com reclamação" />
+              <LegendDot color="bg-amber-400" label="Com gap" />
+              <LegendDot color="bg-emerald-500" label="Com elogio" />
             </div>
           </>
         )}

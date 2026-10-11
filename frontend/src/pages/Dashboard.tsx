@@ -14,6 +14,7 @@ import {
   dashboardService, formatDuration, formatMonthLabel, themeLabel,
 } from "../services/dashboardService";
 import { useAsync } from "../lib/useAsync";
+import { meetingMarkLabel } from "../lib/utils";
 import { PageError, PageLoader } from "../components/ui/PageState";
 import { ProductMeetingGroup } from "../components/products/ProductMeetingGroup";
 import { MODAL_SCROLL, Modal } from "../components/ui/Modal";
@@ -212,7 +213,7 @@ function ProductSection({ items, onSelectProduct }: {
     <Card>
       <CardHeader>
         <CardTitle>O Gráfico de Produto</CardTitle>
-        <CardSubtitle>Reclamações, gaps e elogios por produto citado nas reuniões — clique numa barra para ver as reuniões</CardSubtitle>
+        <CardSubtitle>Quantas reuniões trouxeram reclamação, gap e elogio por produto citado — clique numa barra para ver as reuniões</CardSubtitle>
       </CardHeader>
       <CardContent className="space-y-3">
         {items.length === 0 ? (
@@ -226,9 +227,9 @@ function ProductSection({ items, onSelectProduct }: {
             </div>
             {hasBreakdown && (
               <div className="flex items-center gap-4 pt-2 text-xs text-ink-secondary">
-                <LegendDot color="bg-rose-500" label="Reclamações" />
-                <LegendDot color="bg-amber-400" label="Gaps" />
-                <LegendDot color="bg-emerald-500" label="Elogios" />
+                <LegendDot color="bg-rose-500" label="Reuniões com reclamação" />
+                <LegendDot color="bg-amber-400" label="Com gap" />
+                <LegendDot color="bg-emerald-500" label="Com elogio" />
                 <LegendDot color="bg-gray-300" label="Sem detalhamento" />
               </div>
             )}
@@ -246,6 +247,10 @@ function ProductBar({ product, maxMentions, onSelect }: {
 }) {
   const { nome, mencoes, reclamacoes, gaps, elogios } = product;
   const hasDetail = reclamacoes != null || gaps != null || elogios != null;
+  // Denominador das fatias, não um total de reuniões: as três marcas se
+  // sobrepõem (a mesma reunião pode ter reclamação, gap e elogio), então isto
+  // serve para repartir a largura e para saber se há o que mostrar — nunca
+  // para ser exibido.
   const total = (reclamacoes ?? 0) + (gaps ?? 0) + (elogios ?? 0);
   // Largura da barra escala pelas menções, para comparar volume entre produtos.
   const widthPct = Math.max(6, (mencoes / maxMentions) * 100);
@@ -267,7 +272,7 @@ function ProductBar({ product, maxMentions, onSelect }: {
               <div
                 className="h-full bg-rose-500 flex items-center justify-center text-white text-[9px] font-bold leading-none overflow-visible"
                 style={{ width: `${((reclamacoes ?? 0) / total) * 100}%` }}
-                title={`${reclamacoes} reclamações`}
+                title={meetingMarkLabel(reclamacoes ?? 0, "reclamação")}
               >
                 {reclamacoes}
               </div>
@@ -276,7 +281,7 @@ function ProductBar({ product, maxMentions, onSelect }: {
               <div
                 className="h-full bg-amber-400 flex items-center justify-center text-white text-[9px] font-bold leading-none overflow-visible"
                 style={{ width: `${((gaps ?? 0) / total) * 100}%` }}
-                title={`${gaps} gaps`}
+                title={meetingMarkLabel(gaps ?? 0, "gap")}
               >
                 {gaps}
               </div>
@@ -285,7 +290,7 @@ function ProductBar({ product, maxMentions, onSelect }: {
               <div
                 className="h-full bg-emerald-500 flex items-center justify-center text-white text-[9px] font-bold leading-none overflow-visible"
                 style={{ width: `${((elogios ?? 0) / total) * 100}%` }}
-                title={`${elogios} elogios`}
+                title={meetingMarkLabel(elogios ?? 0, "elogio")}
               >
                 {elogios}
               </div>
