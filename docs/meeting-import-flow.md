@@ -81,7 +81,7 @@ fonte válida de transcrição integral.
 | ID existente com transcrição diferente | Cria nova versão da reunião; conta em `versioned_count` |
 | ID existente, mesmo texto, só metadados alterados | Ignora a reunião; mantém dados anteriores |
 | Texto voltando a uma versão anterior do mesmo ID | Ignora; não cria versão nova |
-| Textos iguais com IDs de reuniões diferentes | São reuniões distintas, com contextos RAG separados |
+| Texto já gravado sob outro ID, ou repetido no mesmo arquivo | Ignora a cópia e mantém a primeira; conta em `skipped_count` |
 | Clique repetido/simultâneo para analisar | Reutiliza `analysis_id`; uma única criação |
 | Timeout no envio para IA | Nova tentativa usa a mesma chave; não cria outra análise |
 
@@ -151,7 +151,9 @@ A divisão é sempre a mesma, então rodar de novo reenvia partes idênticas, qu
 como `DUPLICATE_IMPORT`, e as reuniões concluídas são puladas. Se reuniões de uma
 parte já importada foram excluídas depois, o registro do import continua lá e a
 parte idêntica é recusada. Nesse caso o script confere quais reuniões da parte
-faltam na conta e reenvia só essas, num arquivo com bytes diferentes. `make reunioes-plano`
+faltam na conta e reenvia só essas, num arquivo com bytes diferentes. Uma cópia de
+texto sob outro ID (o CSV repete transcrições, como 1224871 e 1224752) nunca entra
+na conta, então volta nesse reenvio e é recusada como `DUPLICATE_IMPORT` de novo. `make reunioes-plano`
 só divide e valida; `make reunioes LIMIT=5` é um ensaio curto.
 
 Uma falha no envio conta e o lote segue; cinco seguidas param tudo, porque aí o
