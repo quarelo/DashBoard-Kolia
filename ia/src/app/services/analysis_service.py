@@ -27,8 +27,13 @@ from src.app.services.llm_service import (
     generate_chunk_summary,
     generate_embedding,
 )
-from src.app.services.motive_rules import churn_motives, opportunity_motives
+from src.app.services.motive_rules import (
+    churn_motives,
+    is_totvs_customer,
+    opportunity_motives,
+)
 from src.app.services.product_service import ground_products
+from src.app.services.speaker_roles import detect_vendor_speakers, format_speaker_context
 from src.app.services.scoring_service import (
     Ruler,
     calculate_churn_risk,
@@ -315,6 +320,11 @@ def _bound_summary_fact(fact: str, max_chars: int = 320) -> str:
     compact = re.sub(r"\s+", " ", fact).strip()
     if len(compact) <= max_chars:
         return compact
+    # A whole sentence reads better than one cut mid-clause, as long as it keeps
+    # at least half of the room; otherwise fall back to the word boundary.
+    ends = [m.end() for m in re.finditer(r"[.!?](?=\s)", compact[:max_chars + 1])]
+    if ends and ends[-1] >= max_chars // 2:
+        return compact[:ends[-1]]
     shortened = compact[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:")
     return f"{shortened}…"
 
@@ -495,6 +505,60 @@ def _score_reason(score: int, signals: list[str], motives: list[str],
     return "; ".join(MOTIVE_LABELS.get(code, code) for code in dict.fromkeys(motives))
 
 
+_AMOUNT_PATTERN = re.compile(
+    r"(\d+(?:[.,]\d+)*)(?:\s*(milh(?:ão|ões|ao|oes)|mil\b|mi\b|k\b))?", re.IGNORECASE,
+)
+
+
+def _amounts(text: str) -> set[float]:
+    """Every number in the text as a value, so "118 mil", "118.000" and "118000" agree."""
+    found = set()
+    for digits, scale in _AMOUNT_PATTERN.findall(text):
+        if "," in digits:
+            digits = digits.replace(".", "").replace(",", ".")
+        elif re.fullmatch(r"\d{1,3}(?:\.\d{3})+", digits):
+            digits = digits.replace(".", "")
+        try:
+            value = float(digits)
+        except ValueError:  # "1.2.3", "1,5,0": not an amount
+            continue
+        scale = scale.casefold()
+        if scale.startswith("milh") or scale == "mi":
+            value *= 1_000_000
+        elif scale in ("mil", "k"):
+            value *= 1_000
+        found.add(round(value, 2))
+    return found
+
+
+def _ground_budget(budget, source_text: str):
+    """Keep the budget value only when its numbers were said in the meeting.
+
+    The consolidation model turned "a sustentação está em 10 e 500" (R$ 10.500)
+    into implantação 118000 and sustentação anual 500000; 7 of 543 analyses had a
+    budget value whose digits appear nowhere in the transcript.
+
+    ponytail: number-for-number match. A value spoken in words ("cento e dezoito
+    mil") or one the model correctly totalled from two quotes is dropped too;
+    parse number words or accept sums if that starts losing real budgets.
+    """
+    if not isinstance(budget, dict):
+        return budget
+    claimed = _amounts(str(budget.get("valor") or ""))
+    if not claimed:
+        # "Há muito dinheiro envolvido" came back as identificado with no value,
+        # which kept "Orçamento citado" in the opportunity score.
+        return {**budget, "identificado": False, "valor": ""}
+    if claimed <= _amounts(source_text):
+        return budget
+    return {
+        **budget,
+        "identificado": False,
+        "valor": "",
+        "contexto": "Valor descartado: os números citados não aparecem na transcrição.",
+    }
+
+
 # Declaring the whole five-code catalogue is enumeration, not classification: a
 # model with room to list will list. Measured on the reference meeting, a 1B
 # declared all five churn codes and turned a CRM demo into churn 100 where the
@@ -566,10 +630,20 @@ def _evidence_shares(
     }
 
 
+_PROSPECT_CHURN_REASON = "Reunião de prospecção: não há contrato TOTVS em risco."
+
+
 def build_compact_final_summary(
     chunk_summaries: list[dict], source_texts: list[str] | None = None,
-    *, weights: Ruler | None = None,
+    *, weights: Ruler | None = None, budget_identified: bool | None = None,
+    customer: bool = True,
 ) -> dict:
+    """Card built from the chunk summaries, with deterministic scores.
+
+    `budget_identified` is the final word on the budget when another step decided
+    it (LLM consolidation, then `_ground_budget`); left out, the budget built here
+    decides. `customer=False` marks a prospect: no TOTVS contract, so no churn.
+    """
     grouped = {
         "PRODUTO": [], "PERSONA": [], "SENTIMENTO": [], "CHURN": [],
         "OPORTUNIDADE": [], "BUDGET": [], "GAP": [], "PROBLEMA": [],
@@ -611,6 +685,18 @@ def build_compact_final_summary(
         fact for fact in grouped["BUDGET"]
         if _FINANCIAL_VALUE_PATTERN.search(fact)
     ]
+    source_facts = _extract_source_facts(source_texts or []) if source_texts else {}
+    source_budget = source_facts.get("budget", [])
+    budget = {
+        "identificado": bool(source_budget or budget_facts),
+        "valor": "; ".join(_select_metric_facts(source_budget or budget_facts, 3)),
+        "contexto": "; ".join((source_budget or grouped["BUDGET"])[:3]) or "Não identificado.",
+    }
+    if budget_identified is None:
+        budget_identified = budget["identificado"]
+    # "Orçamento citado" justified the opportunity score in 218 analyses, and 170
+    # of them said `budget.identificado = false` on the same card.
+    unbacked = set() if budget_identified else {"MENCAO_BUDGET"}
 
     # Calculate churn risk using deterministic scoring.
     # Filter out non-churn cancellations (e.g., "Pedido cancelado") which are metrics,
@@ -621,16 +707,18 @@ def build_compact_final_summary(
         if not _NON_CHURN_CANCELLATION_PATTERN.search(fact)
     ]
 
+    # A prospect has no TOTVS contract to lose: complaints about its current
+    # vendor are the reason for the meeting, not churn.
     all_churn_motives = _motives_for(
         chunk_summaries, "motivos_churn", filtered_churn_facts, churn_motives,
-    )
+    ) if customer else []
 
     # Calculate opportunity score using deterministic scoring
     opportunities = _select_critical_facts(grouped["OPORTUNIDADE"], 3)
 
-    all_opportunity_motives = _motives_for(
+    all_opportunity_motives = [code for code in _motives_for(
         chunk_summaries, "motivos_oportunidade", opportunities, opportunity_motives,
-    )
+    ) if code not in unbacked]
 
     # The justification has to come from whatever produced the score. Reading it
     # only from rule-matched facts left "score 30" next to "nenhum sinal
@@ -638,13 +726,13 @@ def build_compact_final_summary(
     # The same lists say which codes have a literal quote behind them, which is
     # what makes a code count whole in the score.
     churn_signals = [fact for fact in filtered_churn_facts
-                     if churn_motives(fact)][:3]
+                     if customer and churn_motives(fact)][:3]
     opportunity_signals = [fact for fact in opportunities
-                           if opportunity_motives(fact)][:3]
+                           if set(opportunity_motives(fact)) - unbacked][:3]
     confirmed_churn = {code for fact in filtered_churn_facts
                        for code in churn_motives(fact)}
     confirmed_opportunity = {code for fact in opportunities
-                             for code in opportunity_motives(fact)}
+                             for code in opportunity_motives(fact)} - unbacked
 
     table = weights or ruler()
     churn_risk = calculate_churn_risk(
@@ -694,8 +782,6 @@ def build_compact_final_summary(
         depth += 1
         if depth >= max(len(facts) for _name, facts in ordered):
             break
-    source_facts = _extract_source_facts(source_texts or []) if source_texts else {}
-    source_budget = source_facts.get("budget", [])
     products = source_facts.get("produto", []) or _select_critical_facts(grouped["PRODUTO"], 3)
     personas = source_facts.get("persona", []) or _select_critical_facts(grouped["PERSONA"], 3)
     source_sentiment = source_facts.get("sentimento", [])
@@ -716,7 +802,8 @@ def build_compact_final_summary(
             "versao_regua": churn_risk.ruler_version,
             "justificativa": _score_reason(
                 churn_risk.score, churn_signals, all_churn_motives,
-                "Nenhum sinal explícito identificado."),
+                "Nenhum sinal explícito identificado." if customer
+                else _PROSPECT_CHURN_REASON),
         },
         # The card during processing reads this too: no "[L66]:" in the middle.
         "oportunidade_comercial": clean_card_items(opportunities),
@@ -730,13 +817,7 @@ def build_compact_final_summary(
                 opportunity_score.score, opportunity_signals, all_opportunity_motives,
                 "Nenhuma oportunidade explícita identificada."),
         },
-        "budget": {
-            "identificado": bool(source_budget or budget_facts),
-            "valor": "; ".join(_select_metric_facts(
-                source_facts.get("budget", []) or budget_facts, 3
-            )),
-            "contexto": "; ".join((source_facts.get("budget", []) or grouped["BUDGET"])[:3]) or "Não identificado.",
-        },
+        "budget": budget,
         "gap_produto": clean_card_items((
             source_facts.get("gap", [])
             + [fact for fact in _select_critical_facts(grouped["GAP"], 3)
@@ -930,7 +1011,14 @@ def process_analysis_summaries(
         db.refresh(analysis)
 
         chunks = existing_chunks
-        metadata_context = format_metadata_context(analysis.source_metadata)
+        meeting_text = "\n".join(chunk.content or "" for chunk in chunks)
+        customer = is_totvs_customer(meeting_text)
+        # Transcripts only tag "[L43]"; without saying which speakers are TOTVS,
+        # seller statements became client praise, budget and persona.
+        metadata_context = "\n".join(filter(None, (
+            format_metadata_context(analysis.source_metadata),
+            format_speaker_context(detect_vendor_speakers(meeting_text)),
+        ))) or None
         pending = [chunk for chunk in chunks if chunk.chunk_summary is None]
         # Only the highest-signal chunks are worth an LLM call; the rest get the
         # deterministic summary below. Without this cap every chunk was sent, so a
@@ -961,6 +1049,7 @@ def process_analysis_summaries(
                 analysis.final_summary = build_compact_final_summary(
                     completed_summaries,
                     [chunk.clean_content or chunk.content for chunk in chunks],
+                    customer=customer,
                 )
             db.commit()
             logger.info(
@@ -989,6 +1078,7 @@ def process_analysis_summaries(
             analysis.final_summary = build_compact_final_summary(
                 summaries,
                 [chunk.clean_content or chunk.content for chunk in chunks],
+                customer=customer,
             )
             logger.info("analysis_id=%s deterministic_consolidation=true", analysis.id)
         else:
@@ -1015,14 +1105,15 @@ def process_analysis_summaries(
 
         if settings.product_grounding_enabled:
             grounding_query = _product_grounding_query(summaries, analysis.final_summary)
-            # Nothing was said that even looks like a product: leave `produto`
-            # exactly as consolidation produced it (already `[]` in every real
-            # case, now that no hardcode guesses one from raw keywords) instead
-            # of spending an embedding call and an Ollama call on empty input.
-            if grounding_query.strip():
-                grounded_products = ground_products(
-                    db, grounding_query, settings.product_grounding_top_k
-                )
+            # A catalogue name said literally in the meeting beats any model
+            # mention, so the transcript goes along even when the query is empty.
+            # With neither, `produto` stays as consolidation left it and no
+            # embedding or Ollama call is spent on empty input.
+            grounded_products = ground_products(
+                db, grounding_query, settings.product_grounding_top_k,
+                transcript=meeting_text,
+            )
+            if grounded_products or grounding_query.strip():
                 analysis.final_summary = {
                     **analysis.final_summary, "produto": grounded_products,
                 }
@@ -1034,6 +1125,19 @@ def process_analysis_summaries(
         analysis.final_summary = complete_missing_fields(
             analysis.final_summary, summaries
         )
+        # Last, because the budget is only final here (consolidation, then the
+        # completion above), and the scores have to agree with it.
+        budget = _ground_budget(analysis.final_summary.get("budget"), meeting_text)
+        rescored = build_compact_final_summary(
+            summaries, customer=customer,
+            budget_identified=isinstance(budget, dict) and bool(budget.get("identificado")),
+        )
+        analysis.final_summary = {
+            **analysis.final_summary,
+            **({"budget": budget} if budget is not None else {}),
+            "risco_churn": rescored["risco_churn"],
+            "score_oportunidade": rescored["score_oportunidade"],
+        }
         analysis.summary_stage = "COMPLETE"
         analysis.summary_is_final = True
         analysis.status = "DASHBOARD_READY"

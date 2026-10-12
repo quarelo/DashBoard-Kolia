@@ -290,7 +290,10 @@ class TestEnumeratedCodesNeverScore:
         monkeypatch.setattr(settings, "trust_declared_motives", True)
 
         summary = {
-            "pontos_chave": ["OPORTUNIDADE: querem ampliar para as novas lojas"],
+            # The budget fact backs MENCAO_BUDGET: without an identified budget
+            # the code no longer counts.
+            "pontos_chave": ["OPORTUNIDADE: querem ampliar para as novas lojas",
+                             "BUDGET: R$ 180 mil aprovados"],
             "motivos_churn": [],
             "motivos_oportunidade": [
                 "PEDIDO_EXPANSAO", "MENCAO_BUDGET", "PRAZO_DEFINIDO",

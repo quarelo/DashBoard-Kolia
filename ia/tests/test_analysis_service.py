@@ -49,6 +49,11 @@ class FakeSession:
             values.sort(key=lambda chunk: chunk.chunk_index)
         return FakeResult(values)
 
+    def scalars(self, _statement):
+        # The only `scalars` query is the product catalogue: empty here, so no
+        # name can match literally and grounding falls to the semantic path.
+        return FakeResult([])
+
 
 class FakeResult:
     def __init__(self, values):
@@ -602,7 +607,7 @@ def test_product_grounding_replaces_produto_with_the_catalogue_answer(monkeypatc
     )
     seen = {}
 
-    def fake_ground_products(_db, text, _top_k):
+    def fake_ground_products(_db, text, _top_k, **_kwargs):
         seen["query"] = text
         return ["TOTVS CRM"]
 
@@ -617,9 +622,9 @@ def test_product_grounding_replaces_produto_with_the_catalogue_answer(monkeypatc
 
 
 def test_product_grounding_is_skipped_when_no_product_was_even_mentioned(monkeypatch):
-    """No point spending an embedding call and an Ollama call on a meeting that
-    said nothing product-shaped — and skipping must not erase a `produto` the
-    consolidation step already set for some other reason."""
+    """A meeting that said nothing product-shaped gets only the literal lookup
+    (no embedding or Ollama call: the query is empty), and an empty answer must
+    not erase the `produto` consolidation set."""
     analysis_id = uuid4()
     analysis = MeetingAnalysis(
         id=analysis_id,
@@ -649,17 +654,54 @@ def test_product_grounding_is_skipped_when_no_product_was_even_mentioned(monkeyp
         analysis_service, "consolidate_summaries",
         lambda summaries, **_kwargs: analysis_service.build_compact_final_summary(summaries),
     )
-    monkeypatch.setattr(
-        analysis_service,
-        "ground_products",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("não deveria consultar o catálogo sem menção a produto")
-        ),
-    )
+    calls = []
+
+    def fake_ground_products(_db, text, _top_k, *, transcript=None):
+        calls.append((text, transcript))
+        return []
+
+    monkeypatch.setattr(analysis_service, "ground_products", fake_ground_products)
 
     result = analysis_service.process_analysis_summaries(db=session, analysis_id=analysis_id)
 
+    assert result.status == "DASHBOARD_READY"
+    assert calls == [("", "Combinamos a data da próxima reunião.")]
     assert result.final_summary["produto"] == []
+
+
+def test_vendor_speakers_reach_the_chunk_prompt(monkeypatch):
+    """Without saying which speakers are TOTVS, seller statements were read as
+    the client's praise, budget and persona."""
+    analysis_id = uuid4()
+    analysis = MeetingAnalysis(
+        id=analysis_id, external_meeting_id=uuid4(), title="Reunião",
+        status="PROCESSING", total_chunks=1,
+    )
+    text = "[L43]: Eu sou especialista aqui da Totvs. [L5]: A gente quer reduzir o retrabalho."
+    session = FakeSession()
+    session.add(analysis)
+    session.add(MeetingChunk(
+        analysis_id=analysis_id, external_meeting_id=analysis.external_meeting_id,
+        chunk_index=1, token_count=20, content=text, clean_content=text,
+    ))
+    contexts = []
+
+    def fake_chunk_summary(_text, **kwargs):
+        contexts.append(kwargs.get("metadata_context"))
+        return {"pontos_chave": ["PROBLEMA: retrabalho"]}
+
+    monkeypatch.setattr(analysis_service, "generate_chunk_summary", fake_chunk_summary)
+    monkeypatch.setattr(
+        analysis_service, "consolidate_summaries",
+        lambda summaries, **kwargs: contexts.append(kwargs.get("metadata_context"))
+        or analysis_service.build_compact_final_summary(summaries),
+    )
+    monkeypatch.setattr(settings, "product_grounding_enabled", False)
+
+    analysis_service.process_analysis_summaries(db=session, analysis_id=analysis_id)
+
+    assert len(contexts) == 2
+    assert all("Locutores da TOTVS (vendedores/especialistas): L43." in c for c in contexts)
 
 
 def test_single_compact_chunk_preserves_key_points_as_evidence():
@@ -1187,3 +1229,148 @@ def test_enumerated_declaration_is_still_dropped_for_the_rules(monkeypatch):
     }])
 
     assert result["risco_churn"]["score"] == 50
+
+
+def test_long_fact_is_cut_at_the_last_sentence_end():
+    first = "O cliente quer integrar o financeiro com o banco até março. " * 4
+    fact = analysis_service._bound_summary_fact(first + "Depois " + "palavra " * 60)
+
+    assert fact == first.strip()
+
+
+def test_long_fact_without_a_late_sentence_end_keeps_the_word_cut():
+    fact = analysis_service._bound_summary_fact("Curta. " + "palavra " * 60)
+
+    assert fact.endswith("palavra…")
+    assert len(fact) <= 321
+
+
+def test_budget_value_found_in_the_transcript_is_kept():
+    budget = {"identificado": True, "valor": "R$ 118.000 de implantação",
+              "contexto": "proposta"}
+
+    assert analysis_service._ground_budget(
+        budget, "[L1]: a implantação fica em 118 mil reais") == budget
+
+
+def test_budget_value_absent_from_the_transcript_is_dropped():
+    """The model read "10 e 500" (R$ 10.500) as 118000 and 500000."""
+    budget = {"identificado": True,
+              "valor": '{"implantacao": 118000, "sustentacao_anual": 500000}',
+              "contexto": "proposta"}
+
+    grounded = analysis_service._ground_budget(
+        budget, "[L1]: a sustentação está em 10 e 500 por mês")
+
+    assert grounded["identificado"] is False
+    assert grounded["valor"] == ""
+    assert "não aparecem na transcrição" in grounded["contexto"]
+
+
+def test_budget_without_numbers_is_not_identified():
+    """"Há muito dinheiro envolvido" is not a budget."""
+    budget = {"identificado": True, "valor": "não especificado",
+              "contexto": "há muito dinheiro envolvido"}
+
+    grounded = analysis_service._ground_budget(budget, "[L1]: há muito dinheiro envolvido")
+
+    assert grounded["identificado"] is False
+    assert grounded["valor"] == ""
+    assert grounded["contexto"] == "há muito dinheiro envolvido"
+
+
+def _budget_summary():
+    # No OPORTUNIDADE quote, so the justificativa lists the declared codes.
+    return {
+        "pontos_chave": [],
+        "motivos_churn": [],
+        "motivos_oportunidade": ["PEDIDO_EXPANSAO", "MENCAO_BUDGET"],
+    }
+
+
+def test_budget_motive_counts_only_with_an_identified_budget(monkeypatch):
+    """218 cards justified the opportunity with "orçamento citado", 170 of them
+    next to `budget.identificado = false`."""
+    monkeypatch.setattr(settings, "trust_declared_motives", True)
+    label = analysis_service.MOTIVE_LABELS["MENCAO_BUDGET"]
+
+    backed = analysis_service.build_compact_final_summary(
+        [_budget_summary()], budget_identified=True)["score_oportunidade"]
+    unbacked = analysis_service.build_compact_final_summary(
+        [_budget_summary()], budget_identified=False)["score_oportunidade"]
+
+    assert label in backed["justificativa"]
+    assert label not in unbacked["justificativa"]
+    assert unbacked["score"] < backed["score"]
+
+
+def test_prospect_complaint_about_its_current_vendor_is_not_churn(monkeypatch):
+    monkeypatch.setattr(settings, "trust_declared_motives", True)
+    transcript = "[L2]: hoje nós usamos o SAP e estamos insatisfeitos com o suporte"
+    summary = {
+        "pontos_chave": ["CHURN: cliente insatisfeito com o sistema atual"],
+        "motivos_churn": ["INSATISFACAO_EXPLICITA", "RECLAMACAO_PRODUTO"],
+        "motivos_oportunidade": [],
+    }
+
+    churn = analysis_service.build_compact_final_summary(
+        [summary], customer=analysis_service.is_totvs_customer(transcript),
+    )["risco_churn"]
+
+    assert churn["score"] == 0
+    assert churn["justificativa"] == analysis_service._PROSPECT_CHURN_REASON
+
+
+def test_customer_cancellation_threat_keeps_churn(monkeypatch):
+    monkeypatch.setattr(settings, "trust_declared_motives", True)
+    transcript = "[L2]: se não resolverem isso vamos cancelar o contrato com a Totus"
+    summary = {
+        "pontos_chave": ["CHURN: cliente ameaçou cancelar o contrato"],
+        "motivos_churn": ["AMEACA_CANCELAMENTO"],
+        "motivos_oportunidade": [],
+    }
+
+    churn = analysis_service.build_compact_final_summary(
+        [summary], customer=analysis_service.is_totvs_customer(transcript),
+    )["risco_churn"]
+
+    assert churn["score"] > 0
+
+
+def test_pipeline_drops_invented_budget_and_scores_without_it(monkeypatch):
+    """After consolidation: budget grounded in the transcript, then rescored."""
+    monkeypatch.setattr(settings, "fast_deterministic_consolidation", False)
+    monkeypatch.setattr(settings, "trust_declared_motives", True)
+    monkeypatch.setattr(settings, "product_grounding_enabled", False)
+    analysis_id = uuid4()
+    analysis = MeetingAnalysis(
+        id=analysis_id, external_meeting_id=uuid4(), title="Budget",
+        status="ANALYZING", total_tokens=4, total_chunks=1,
+    )
+    summary = {**_budget_summary(),
+               "motivos_churn": ["INSATISFACAO_EXPLICITA"]}
+    session = FakeSession()
+    session.added.extend([analysis, MeetingChunk(
+        analysis_id=analysis_id, external_meeting_id=analysis.external_meeting_id,
+        chunk_index=1, token_count=2, chunk_summary=summary,
+        content="[L2]: estamos insatisfeitos com o sistema atual, custa 10 e 500",
+        clean_content="estamos insatisfeitos com o sistema atual, custa 10 e 500",
+    )])
+    monkeypatch.setattr(
+        analysis_service, "consolidate_summaries",
+        lambda _summaries, **_kwargs: {
+            "budget": {"identificado": True, "valor": "R$ 118.000",
+                       "contexto": "implantação"},
+        },
+    )
+    monkeypatch.setattr(
+        analysis_service, "complete_missing_fields", lambda final, _chunks: final
+    )
+
+    final = analysis_service.process_analysis_summaries(session, analysis_id).final_summary
+
+    assert final["budget"]["identificado"] is False
+    assert analysis_service.MOTIVE_LABELS["MENCAO_BUDGET"] not in \
+        final["score_oportunidade"]["justificativa"]
+    # No TOTVS product or contract in the transcript: a prospect.
+    assert final["risco_churn"]["score"] == 0
