@@ -42,7 +42,7 @@ def _normalize_chunk_summary(summary: dict[str, Any]) -> dict[str, Any]:
         category = _CHUNK_CATEGORY_ALIASES.get(
             category.strip().upper(), category.strip().upper()
         )
-        fact = fact.strip()
+        fact = tidy_text(fact.strip())
         if category in _CHUNK_CATEGORIES and fact:
             normalized.append(f"{category}: {fact}")
         if len(normalized) == 12:
@@ -70,6 +70,43 @@ def _valid_codes(values: Any, allowed: list[str]) -> list[str]:
         if isinstance(value, str) and value in allowed and value not in seen:
             seen.append(value)
     return seen
+
+
+# Measured on 543 analyses: 54 carried non-Latin characters glued to words (a CJK
+# char right after "o"), and 337 sentiment justifications stopped mid-sentence at
+# the schema's maxLength. Kept: ASCII, Latin-1 and Latin Extended (accents, º, ª),
+# general punctuation (dashes, curly quotes, ellipsis) and the euro sign.
+_GARBAGE_CHARS = re.compile(r"[^\x20-\x7E\u00A0-\u024F\u2010-\u205E\u20AC\s]")
+_SENTENCE_END = re.compile(r"[.!?…][)\]\"'»”]*$")
+
+
+def tidy_text(text: str) -> str:
+    """Model text without stray script characters, ending on a full sentence.
+
+    A text that does not end in sentence punctuation goes back to its last
+    complete sentence; with none to go back to, it is left as it is, because a
+    short label ("TOTVS CRM") never had a period to begin with.
+    """
+    text = re.sub(r"[ \t]{2,}", " ", _GARBAGE_CHARS.sub("", text)).strip()
+    if _SENTENCE_END.search(text):
+        return text
+    last_sentence = re.match(r"^(.*[.!?…][)\]\"'»”]*)\s", text)
+    return last_sentence.group(1) if last_sentence else text
+
+
+# Literal quotes, money values and enum labels are kept whole: only filtered.
+_UNTRIMMED_KEYS = {"trecho", "valor", "classificacao"}
+
+
+def _tidy_summary(value: Any, *, trim: bool = True) -> Any:
+    if isinstance(value, str):
+        return tidy_text(value) if trim else _GARBAGE_CHARS.sub("", value)
+    if isinstance(value, list):
+        return [_tidy_summary(item, trim=trim) for item in value]
+    if isinstance(value, dict):
+        return {key: _tidy_summary(item, trim=trim and key not in _UNTRIMMED_KEYS)
+                for key, item in value.items()}
+    return value
 
 
 _SPEAKER_TAG = re.compile(r"\[\s*(?:l|locutor)\s*\d+\s*\]\s*:?\s*", re.IGNORECASE)
@@ -484,7 +521,7 @@ def complete_missing_fields(
     for name in _CARD_TEXT_FIELDS:
         if name in merged:
             merged[name] = clean_card_items(merged[name], cut_at=_FINAL_ITEM_MAX_CHARS)
-    return merged
+    return _tidy_summary(merged)
 
 
 def _post_json(
@@ -818,7 +855,8 @@ evidências, recomendações e dúvidas em aberto.
   escritos como perguntas objetivas com suas palavras. Raciocine sobre a reunião
   inteira: o que foi prometido e não confirmado, o que o cliente não sabe ou não
   decidiu, o que depende de alguém que não estava presente, o que ficou sem prazo
-  ou sem responsável. Não liste o que já foi respondido na própria reunião.
+  ou sem responsável. Não liste o que já foi respondido na própria reunião:
+  descarte a pergunta que outro fato dos resumos já responde.
   Nunca copie falas da transcrição, tags como [L5] ou rótulos como "DÚVIDA:";
   cumprimentos ("tudo bem?") e perguntas de confirmação ("né?", "isso?") não são
   pontos em aberto. Sem ponto em aberto de verdade, lista vazia.
