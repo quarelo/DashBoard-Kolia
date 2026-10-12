@@ -214,13 +214,19 @@ def dashboard_meetings(
     cnae: str | None = Query(None, description="Filtra por CNAE (exato)."),
     dt_meeting_from: str | None = Query(None, description="Data da reunião a partir de (YYYY-MM-DD)."),
     dt_meeting_to: str | None = Query(None, description="Data da reunião até (YYYY-MM-DD)."),
+    search: str | None = Query(
+        None,
+        max_length=120,
+        description="Busca por título, número da reunião, produto ou persona "
+                    "(contém, case-insensitive). Filtra a tabela inteira, não a página.",
+    ),
     _user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     return analysis_read.list_analyses(
         db, offset, limit, uf=uf, segmento=segmento, unidade=unidade,
         formato=formato, cnae=cnae, dt_meeting_from=dt_meeting_from,
-        dt_meeting_to=dt_meeting_to,
+        dt_meeting_to=dt_meeting_to, search=search,
     )
 
 

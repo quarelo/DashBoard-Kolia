@@ -1,9 +1,10 @@
-import { useState, useMemo } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Search, ChevronRight, ChevronDown, Filter, Layers, Users, Calendar, CheckCircle2, Loader2, Trash2,
 } from "lucide-react";
 import { useAsync } from "../lib/useAsync";
+import { useDebounced } from "../lib/useDebounced";
 import { useAuth } from "../context/AuthContext";
 import { DeleteMeetingDialog } from "../components/meetings/DeleteMeetingDialog";
 import { dashboardService, sentimentLabels, sentimentTone, statusLabel } from "../services/dashboardService";
@@ -140,11 +141,17 @@ const PAGE_SIZE = 50;
 export function Meetings() {
   const overview = useAsync(() => dashboardService.overview(), []);
   const [page, setPage] = useState(0);
-  const { data, loading, error, reload } = useAsync(
-    () => dashboardService.list(page * PAGE_SIZE, PAGE_SIZE),
-    [page],
-  );
   const [search, setSearch] = useState("");
+  // A busca vai ao backend, que filtra a tabela inteira: filtrada aqui, ela só
+  // via as 50 linhas da página, e uma reunião da página 2 em diante não
+  // aparecia. Volta para a primeira página a cada termo novo, senão uma busca
+  // com 3 resultados feita na página 4 abre num offset que não existe.
+  const query = useDebounced(search.trim(), 300);
+  useEffect(() => setPage(0), [query]);
+  const { data, loading, error, reload } = useAsync(
+    () => dashboardService.list(page * PAGE_SIZE, PAGE_SIZE, query),
+    [page, query],
+  );
   const [sentimentFilter, setSentimentFilter] = useState("all");
   const [sortField, setSortField] = useState<"date" | "riskScore" | "opportunityScore">("date");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -160,15 +167,6 @@ export function Meetings() {
 
   const filtered = useMemo(() => {
     let rows = [...items];
-    if (search) {
-      const q = search.toLowerCase();
-      rows = rows.filter(
-        (m) =>
-          m.title.toLowerCase().includes(q) ||
-          m.products.some((p) => p.toLowerCase().includes(q)) ||
-          m.personas.some((p) => p.toLowerCase().includes(q)),
-      );
-    }
     if (sentimentFilter !== "all") rows = rows.filter((m) => m.sentiment === sentimentFilter);
     rows.sort((a, b) => {
       const cmp =
@@ -178,7 +176,7 @@ export function Meetings() {
       return sortDir === "asc" ? cmp : -cmp;
     });
     return rows;
-  }, [items, search, sentimentFilter, sortField, sortDir]);
+  }, [items, sentimentFilter, sortField, sortDir]);
 
   function toggleSort(field: typeof sortField) {
     if (sortField === field) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -198,7 +196,9 @@ export function Meetings() {
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Reuniões</h1>
         <p className="text-sm text-gray-500 mt-0.5">
-          {filtered.length} de {items.length} nesta página · {total} analisadas pela IA
+          {query
+            ? `${total} ${total === 1 ? "reunião encontrada" : "reuniões encontradas"} para "${query}"`
+            : `${filtered.length} de ${items.length} nesta página · ${total} analisadas pela IA`}
         </p>
       </div>
 
@@ -260,7 +260,11 @@ export function Meetings() {
         </div>
       </div>
 
-      {items.length === 0 ? (
+      {items.length === 0 && query ? (
+        <div className="text-center py-16 text-sm text-gray-400 bg-white rounded-xl border border-gray-200">
+          Nenhuma reunião encontrada para "{query}".
+        </div>
+      ) : items.length === 0 ? (
         <EmptyState
           title="Nenhuma reunião analisada ainda"
           hint="Importe transcrições e rode a análise para vê-las aqui."

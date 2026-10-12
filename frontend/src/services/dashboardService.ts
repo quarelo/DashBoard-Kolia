@@ -365,9 +365,15 @@ export const dashboardService = {
     };
   },
 
-  async list(offset = 0, limit = 100): Promise<{ total: number; items: AnalysisListItem[] }> {
+  async list(
+    offset = 0,
+    limit = 100,
+    search = "",
+  ): Promise<{ total: number; items: AnalysisListItem[] }> {
+    const query = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+    if (search.trim()) query.set("search", search.trim());
     const raw = await apiRequest<{ total: number; items: RawListItem[] }>(
-      `/api/dashboard/meetings?offset=${offset}&limit=${limit}`,
+      `/api/dashboard/meetings?${query}`,
     );
     return { total: raw.total, items: (raw.items ?? []).map(toListItem) };
   },

@@ -109,6 +109,22 @@ def to_list_item(row: Any) -> dict:
     }
 
 
+_SEARCH_CLAUSE = """(
+        lower(a.title) LIKE :search
+        OR lower(coalesce(m.external_id, '')) LIKE :search
+        OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(
+                CASE WHEN jsonb_typeof(a.final_summary->'produto') = 'array'
+                     THEN a.final_summary->'produto' ELSE '[]'::jsonb END) AS produto
+            WHERE lower(produto) LIKE :search)
+        OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(
+                CASE WHEN jsonb_typeof(a.final_summary->'persona') = 'array'
+                     THEN a.final_summary->'persona' ELSE '[]'::jsonb END) AS persona
+            WHERE lower(persona) LIKE :search)
+    )"""
+
+
 def _build_filters(
     *,
     uf: str | None = None,
@@ -118,8 +134,13 @@ def _build_filters(
     cnae: str | None = None,
     dt_meeting_from: str | None = None,
     dt_meeting_to: str | None = None,
+    search: str | None = None,
 ) -> tuple[str, dict]:
-    """Build WHERE clauses and params for JSONB filters on core.meetings.source_metadata."""
+    """WHERE clauses and params for the metadata filters and the text search.
+
+    Most clauses read `core.meetings.source_metadata`; `search` also reads
+    `a.title` and the `produto`/`persona` lists of `a.final_summary`.
+    """
     clauses: list[str] = []
     params: dict[str, str] = {}
     if uf:
@@ -143,6 +164,13 @@ def _build_filters(
     if dt_meeting_to:
         clauses.append("m.source_metadata->>'DT_MEETING' <= :dt_to")
         params["dt_to"] = dt_meeting_to
+    if search and search.strip():
+        clauses.append(_SEARCH_CLAUSE)
+        # `lower() LIKE`, como os filtros de segmento e unidade acima: casa o
+        # trecho em qualquer posição, sem depender de extensão no banco. Não
+        # ignora acento, então "Reuniao" não acha "Reunião" — buscar pelo número
+        # da reunião, que é o caso comum, não tem acento.
+        params["search"] = f"%{search.strip().lower()}%"
     where = (" AND " + " AND ".join(clauses)) if clauses else ""
     return where, params
 
@@ -178,10 +206,18 @@ def list_analyses(
     cnae: str | None = None,
     dt_meeting_from: str | None = None,
     dt_meeting_to: str | None = None,
+    search: str | None = None,
 ) -> dict:
+    """Uma página da listagem, com `total` contando só o que passou pelo filtro.
+
+    O `search` é aplicado aqui, no SQL, e não sobre a página já carregada: a
+    busca rodava no cliente sobre os 50 itens da página, então procurar uma
+    reunião que estava na página 4 não achava nada.
+    """
     extra_where, params = _build_filters(
         uf=uf, segmento=segmento, unidade=unidade, formato=formato,
         cnae=cnae, dt_meeting_from=dt_meeting_from, dt_meeting_to=dt_meeting_to,
+        search=search,
     )
     # When filters target core.meetings columns the JOIN must match; rows
     # without a linked meeting are excluded by any metadata filter.
