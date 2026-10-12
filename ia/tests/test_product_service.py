@@ -117,3 +117,142 @@ def test_ground_products_asks_the_model_only_among_the_plausible_candidates(monk
         ("TOTVS RH", "Gestão de recursos humanos."),
         ("App Meu RH", "App do colaborador."),
     ]
+
+
+_CATALOGUE = [
+    "TOTVS Fluig",
+    "App My Fluig",
+    "Suporte e Sustentação",
+    "TOTVS Saúde Planos - Linha Protheus",
+    "TOTVS Saúde Planos - Linha Datasul",
+    "TOTVS Assinatura Eletrônica",
+    "App Minha Assinatura Eletrônica",
+    "TOTVS RH Ponto Eletrônico - Linha RM",
+    "TOTVS Transmite",
+    "TOTVS Gestão Financeira - Linha Gesplan",
+    "App Minha Produção - Linha Protheus",
+    "Process Mining by Upflux",
+    "Ciclo de Receita by UpFlux",
+    "TOTVS Performance e Gestão",
+    "TOTVS Analytics",
+    "TOTVS Agendamentos",
+    "PaaS",
+    "Gestão de Vendas by Retail App",
+]
+
+
+def _literal_only(monkeypatch, catalogue=_CATALOGUE):
+    monkeypatch.setattr(product_service, "catalogue_names", lambda db: catalogue)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("menção literal não deveria cair na busca semântica")
+
+    monkeypatch.setattr(product_service, "find_candidate_products", fail_if_called)
+
+
+def _ground(transcript, text="produto citado"):
+    return product_service.ground_products(db=None, text=text, transcript=transcript)
+
+
+def test_literal_brand_word_wins_over_semantic_guess(monkeypatch):
+    _literal_only(monkeypatch)
+    transcript = "O contrato de suporte cobre o Fluig. O Fluig integra com o Proteus."
+
+    assert _ground(transcript) == ["TOTVS Fluig"]
+
+
+def test_literal_name_after_alias_fix(monkeypatch):
+    _literal_only(monkeypatch)
+    transcript = "Vamos usar a Totus Assinatura Eletrônica nos contratos."
+
+    assert _ground(transcript) == ["TOTVS Assinatura Eletrônica"]
+
+
+def test_literal_alias_names_product_and_generic_phrases_do_not(monkeypatch):
+    _literal_only(monkeypatch)
+    transcript = (
+        "O Transmit manda as notas. A minha produção cresceu. "
+        "O Transmit resolve a gestão financeira."
+    )
+
+    assert _ground(transcript) == ["TOTVS Transmite"]
+
+
+def test_literal_by_name_needs_its_brand_said(monkeypatch):
+    _literal_only(monkeypatch)
+    transcript = "Process mining mostra o gargalo; o AppFlux faz o process mining."
+
+    assert _ground(transcript) == ["Process Mining by Upflux"]
+
+
+def test_literal_ranks_by_mentions_and_caps_at_top_k(monkeypatch):
+    _literal_only(monkeypatch)
+    transcript = (
+        "Totvs Assinatura Eletrônica. Fluig, Fluig e Fluig. "
+        "Falamos de suporte e sustentação."
+    )
+
+    assert product_service.ground_products(
+        db=None, text="x", top_k=2, transcript=transcript
+    ) == ["TOTVS Fluig", "Suporte e Sustentação"]
+
+
+def test_literal_prefers_the_line_variant_whose_line_is_said(monkeypatch):
+    _literal_only(monkeypatch)
+    transcript = "O TOTVS Saúde Planos roda no Protheus."
+
+    assert _ground(transcript) == ["TOTVS Saúde Planos - Linha Protheus"]
+
+
+def test_literal_runs_even_with_empty_grounding_query(monkeypatch):
+    _literal_only(monkeypatch)
+
+    assert _ground("Abrimos chamado no Fluig.", text="") == ["TOTVS Fluig"]
+
+
+def test_generic_words_fall_back_to_the_semantic_path(monkeypatch):
+    """No catalogue name said (only generic words like "analytics",
+    "agendamentos", "PaaS", "gestão de vendas" without its brand): the
+    existing semantic path decides, unchanged."""
+    monkeypatch.setattr(product_service, "catalogue_names", lambda db: _CATALOGUE)
+    monkeypatch.setattr(settings, "product_grounding_confident_distance", 0.20)
+    candidates = [(_FakeProduct("TOTVS Analytics", "BI."), 0.05)]
+    monkeypatch.setattr(
+        product_service, "find_candidate_products", lambda db, text, top_k: candidates
+    )
+    transcript = (
+        "Precisamos de analytics, agendamentos e PaaS para a gestão de vendas; "
+        "o processo vai fluir melhor."
+    )
+
+    assert _ground(transcript, text="painel de indicadores") == ["TOTVS Analytics"]
+
+
+def test_unsaid_product_skips_arbitration_and_stays_empty(monkeypatch):
+    """With the transcript searched and no name said, a merely plausible
+    neighbour is a guess: arbitration picked "TOTVS Varejo Index" for a hospital."""
+    monkeypatch.setattr(product_service, "catalogue_names", lambda db: _CATALOGUE)
+    monkeypatch.setattr(settings, "product_grounding_confident_distance", 0.20)
+    monkeypatch.setattr(settings, "product_grounding_plausible_distance", 0.45)
+    candidates = [(_FakeProduct("TOTVS Varejo Index", "Varejo."), 0.35)]
+    monkeypatch.setattr(
+        product_service, "find_candidate_products", lambda db, text, top_k: candidates
+    )
+    monkeypatch.setattr(
+        product_service, "classify_products",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no arbitration")),
+    )
+
+    assert _ground("lentidão na prescrição do hospital", text="painel lento") == []
+
+
+def test_without_transcript_the_catalogue_names_are_never_read(monkeypatch):
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("sem transcrição não há busca literal")
+
+    monkeypatch.setattr(product_service, "catalogue_names", fail_if_called)
+    monkeypatch.setattr(
+        product_service, "find_candidate_products", lambda db, text, top_k: []
+    )
+
+    assert product_service.ground_products(db=None, text="reunião sobre o Fluig") == []

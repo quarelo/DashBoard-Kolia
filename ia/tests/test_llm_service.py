@@ -763,3 +763,61 @@ def test_classify_products_returns_empty_list_when_no_candidate_applies():
     )
 
     assert result == []
+
+
+def test_tidy_text_trims_a_cut_tail_back_to_the_last_sentence():
+    from src.app.services.llm_service import tidy_text
+
+    assert tidy_text("Cliente gostou da demo. Achou o preço alto para o porte da") == (
+        "Cliente gostou da demo.")
+    assert tidy_text("Cliente gostou da demo.") == "Cliente gostou da demo."
+    assert tidy_text("Fechou (prazo curto).") == "Fechou (prazo curto)."
+    # No complete sentence to go back to, and a period inside a number is not one.
+    assert tidy_text("TOTVS CRM") == "TOTVS CRM"
+    assert tidy_text("Valor de R$ 1.500 mensais") == "Valor de R$ 1.500 mensais"
+
+
+def test_tidy_text_drops_non_latin_characters_and_keeps_portuguese():
+    from src.app.services.llm_service import tidy_text
+
+    assert tidy_text("Cliente quer o漢 módulo 漢 fiscal – 20% em R$ “já”.") == (
+        "Cliente quer o módulo fiscal – 20% em R$ “já”.")
+
+
+def test_final_summary_text_is_trimmed_and_filtered_at_the_exit():
+    from src.app.services.llm_service import FINAL_SUMMARY_SCHEMA
+
+    summary = {name: [] for name in FINAL_SUMMARY_SCHEMA["required"]}
+    summary["sentimento"] = {
+        "classificacao": "positivo",
+        "justificativa": "Cliente elogiou a integração. Pediu prazo menor para o",
+    }
+    summary["budget"] = {"identificado": True, "valor": "R$ 50 mil",
+                         "contexto": "Orçamento anual aprovado. Depende da"}
+    summary["feedback_produto"] = ["Gostou do painel一 de vendas."]
+
+    result = complete_missing_fields(summary, [])
+
+    assert result["sentimento"]["justificativa"] == "Cliente elogiou a integração."
+    assert result["budget"] == {"identificado": True, "valor": "R$ 50 mil",
+                                "contexto": "Orçamento anual aprovado."}
+    assert result["feedback_produto"] == ["Gostou do painel de vendas."]
+
+
+def test_speaker_context_reaches_chunk_and_consolidation_prompts():
+    from src.app.services.speaker_roles import format_speaker_context
+
+    context = format_speaker_context(["43"])
+    prompts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        prompts.append(json.loads(request.content)["prompt"])
+        return httpx.Response(200, json={"response": json.dumps(
+            {"pontos_chave": ["FEEDBACK: Cliente gostou."]}, ensure_ascii=False)})
+
+    generate_chunk_summary("[L43]: texto", client=client_for(handler),
+                           metadata_context=context)
+    consolidate_summaries([], client=client_for(handler), metadata_context=context)
+
+    assert all("só contam quando ditos pelo cliente" in prompt for prompt in prompts)
+    assert "descarte a pergunta que outro fato dos resumos já responde" in prompts[1]
