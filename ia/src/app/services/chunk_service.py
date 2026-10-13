@@ -1,6 +1,5 @@
 import re
 
-from src.app.services.transcript_aliases import normalize_aliases
 
 _SPEAKER_PATTERN = re.compile(r"\[LOCUTOR\s+(\d+)\]\s*:\s*", re.IGNORECASE)
 _COMPACT_SPEAKER_PATTERN = re.compile(r"\[L(\d+)\]\s*:\s*", re.IGNORECASE)
@@ -20,7 +19,7 @@ def _is_small_talk_turn(text: str) -> bool:
 
 
 def clean_transcription(text: str) -> str:
-    sanitized = normalize_aliases(sanitize_transcription(text))
+    sanitized = sanitize_transcription(text)
     matches = list(_SPEAKER_PATTERN.finditer(sanitized))
     if not matches:
         return sanitized

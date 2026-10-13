@@ -75,35 +75,15 @@ def test_same_file_renamed_and_equivalent_json_are_rejected(client):
 
 def test_mixed_file_imports_new_meetings_and_versions_changed_ones(client):
     assert upload(client).status_code == 201
-    result = upload(client, csv_bytes(("100",)) + "101,Outra reunião.\n".encode()).json()
+    result = upload(client, csv_bytes(("100", "101"))).json()
     assert (result["imported_count"], result["skipped_count"]) == (1, 1)
-    changed = upload(client, ("ID_MEETING,ANON_TRANSCRICAO\n100,Conteúdo alterado.\n"
-                              "102,Conteúdo novo.\n").encode()).json()
+    changed = upload(client, csv_bytes(("100", "102"), text="Conteúdo alterado.")).json()
     # 102 is new; 100 already existed with different text, so it gains a version.
     assert (changed["imported_count"], changed["versioned_count"], changed["skipped_count"]) == (1, 1, 0)
     listing = client.get("/api/meetings").json()
     assert listing["total"] == 3
     assert {(m["external_id"], m["version"]) for m in listing["items"]} == {
         ("100", 2), ("101", 1), ("102", 1)}
-
-
-def test_same_text_under_another_id_is_skipped_keeping_the_first(client):
-    # Within one file: 201 repeats 200's text, 202 is new.
-    data = ("ID_MEETING,ANON_TRANSCRICAO\n200,Texto repetido.\n201,Texto repetido.\n"
-            "202,Texto único.\n").encode()
-    result = upload(client, data).json()
-    assert (result["imported_count"], result["skipped_count"]) == (2, 1)
-    # Across uploads: 300 repeats what 200 already stored, 301 is new.
-    later = upload(client, csv_bytes(("300", "301"), text="Texto repetido.")).json()
-    assert later.get("detail", {}).get("code") == "DUPLICATE_IMPORT", later
-    mixed = ("ID_MEETING,ANON_TRANSCRICAO\n300,Texto repetido.\n301,Outro texto.\n").encode()
-    result = upload(client, mixed).json()
-    assert (result["imported_count"], result["skipped_count"]) == (1, 1)
-    # A revision of 202 to text 200 already has is a copy too, not a new version.
-    assert upload(client, b"ID_MEETING,ANON_TRANSCRICAO\n202,Texto repetido.\n").status_code == 409
-    listing = client.get("/api/meetings?include_versions=true").json()
-    assert {(m["external_id"], m["version"]) for m in listing["items"]} == {
-        ("200", 1), ("202", 1), ("301", 1)}
 
 
 def test_changed_transcription_creates_version_without_touching_the_previous_one(client):

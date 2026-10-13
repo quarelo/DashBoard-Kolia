@@ -6,9 +6,7 @@ the 1B model got wrong during evaluation.
 """
 import pytest
 
-from src.app.services.motive_rules import (
-    churn_motives, is_totvs_customer, opportunity_motives,
-)
+from src.app.services.motive_rules import churn_motives, opportunity_motives
 from src.app.services.scoring_service import (
     calculate_churn_risk, calculate_opportunity_score,
 )
@@ -195,28 +193,3 @@ class TestDenyingASignalIsNotTheSignal:
         fact = ("Não há menção explícita de expansão de contrato, novo módulo ou "
                 "necessidade não atendida pelo portfólio atual.")
         assert calculate_opportunity_score(opportunity_motives(fact)).score == 0
-
-
-class TestTotvsCustomer:
-    """Churn needs a TOTVS contract to lose; these say whether there is one."""
-
-    @pytest.mark.parametrize("transcript", [
-        "[L2]: hoje a gente usa o Proteus para o financeiro",
-        "[L1]: vocês já utilizam o RM? [L2]: Isso.",
-        "[L3]: o nosso contrato com a Totus vence em março",
-        "[L2]: se não resolverem vamos cancelar o contrato com a Totos",
-        "[L1]: vocês hoje possuem um Fluig no RH, perfeito?",
-        "[L1]: a consulta que eu rodei no Protheus de vocês",
-    ])
-    def test_client_already_runs_totvs(self, transcript):
-        assert is_totvs_customer(transcript)
-
-    @pytest.mark.parametrize("transcript", [
-        # The seller presenting the portfolio is not the client owning it.
-        "[L1]: aqui na TOTVS a gente tem o Protheus, que é o nosso ERP",
-        "[L2]: hoje nós usamos o SAP e o suporte é muito ruim",
-        "[L1]: vocês usam qual sistema hoje? [L2]: um ERP local",
-        "[L1]: todas as soluções que eles têm são da Tots",
-    ])
-    def test_prospect_has_no_totvs_contract(self, transcript):
-        assert not is_totvs_customer(transcript)

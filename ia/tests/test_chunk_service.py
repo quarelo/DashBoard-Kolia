@@ -91,11 +91,3 @@ def test_partial_ranking_covers_timeline_and_prioritizes_signals():
     assert {0, 3, 6}.issubset(ranked)
     assert {2, 4}.issubset(ranked)
     assert len(ranked) == len(set(ranked)) == 5
-
-
-def test_clean_transcription_normalizes_aliases_and_keeps_speaker_format():
-    text = "[LOCUTOR 1]: Usamos o Proteus.\n[LOCUTOR 2]: E o Totus Fluig?"
-
-    assert clean_transcription(text) == (
-        "[L1]: Usamos o Protheus. [L2]: E o TOTVS Fluig?"
-    )

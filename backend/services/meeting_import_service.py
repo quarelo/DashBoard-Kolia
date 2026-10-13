@@ -9,28 +9,23 @@ from models.user import UserModel
 from services.meeting_parser import ImportValidationError, ParsedImport
 
 
-def _existing_state(db: Session, owner_id: int, parsed: ParsedImport):
-    """Latest version per external_id, every transcription hash stored per id, and
-    which id each of the file's transcriptions is already stored under.
+def _existing_state(db: Session, owner_id: int, external_ids: list[str]):
+    """Latest version per external_id, plus every transcription hash ever stored for it.
 
-    The per-id hash set is what stops an A → B → A edit cycle from growing a new
-    version on every upload: content already stored under that id is skipped, not
-    re-versioned. The hash → id map catches the same text under another id.
+    The hash set is what stops an A → B → A edit cycle from growing a new version
+    on every upload: content already stored under that id is skipped, not re-versioned.
     """
     latest: dict[str, ImportedMeeting] = {}
     seen_hashes: dict[str, set[str]] = defaultdict(set)
-    hash_owner: dict[str, str] = {}
     rows = db.scalars(select(ImportedMeeting).where(
         ImportedMeeting.owner_id == owner_id,
-        or_(ImportedMeeting.external_id.in_([m.external_id for m in parsed.meetings]),
-            ImportedMeeting.transcription_hash.in_([m.transcription_hash for m in parsed.meetings])),
+        ImportedMeeting.external_id.in_(external_ids),
     ))
     for row in rows:
         seen_hashes[row.external_id].add(row.transcription_hash)
-        hash_owner.setdefault(row.transcription_hash, row.external_id)
         if row.external_id not in latest or row.version > latest[row.external_id].version:
             latest[row.external_id] = row
-    return latest, seen_hashes, hash_owner
+    return latest, seen_hashes
 
 
 def import_meetings(db: Session, owner_id: int, filename: str, parsed: ParsedImport) -> MeetingImport:
@@ -48,16 +43,12 @@ def import_meetings(db: Session, owner_id: int, filename: str, parsed: ParsedImp
         if duplicate:
             raise ImportValidationError("Este arquivo já foi importado.", "DUPLICATE_IMPORT", 409)
 
-        latest, seen_hashes, hash_owner = _existing_state(db, owner_id, parsed)
+        latest, seen_hashes = _existing_state(
+            db, owner_id, [m.external_id for m in parsed.meetings])
         created, revised = [], []
         for item in parsed.meetings:
             if item.transcription_hash in seen_hashes[item.external_id]:
                 continue  # Same content already stored under this id, in some version.
-            if hash_owner.setdefault(item.transcription_hash, item.external_id) != item.external_id:
-                # Same text already stored, or earlier in this file, under another id:
-                # the dataset repeats transcriptions under new ids, and each copy
-                # would be analysed again. The first one wins.
-                continue
             (revised if item.external_id in latest else created).append(item)
         if not created and not revised:
             raise ImportValidationError("Todas as reuniões já foram importadas.", "DUPLICATE_IMPORT", 409)
